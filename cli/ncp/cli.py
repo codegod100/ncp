@@ -11,7 +11,7 @@ import sys
 from typing import Optional
 from urllib.parse import urljoin
 
-DEFAULT_API_URL = "https://nix.latha.org/api"
+DEFAULT_API_URL = "https://nix.latha.org"
 
 class NCPClient:
     """Client for the Nix-Fly API"""
