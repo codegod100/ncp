@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-NCP Container Management API - Dynamic Edition
-Uses nixos-container with inline config for proper container lifecycle
+NCP Container Management API - With User Authentication
 """
 
 import subprocess
@@ -10,14 +9,56 @@ import os
 import re
 import tempfile
 import shutil
+import hashlib
+import secrets
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, HTMLResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import uvicorn
-from datetime import datetime
+from datetime import datetime, timedelta
 
-app = FastAPI(title="NCP API", version="2.1.0")
+# JWT support
+try:
+    import jwt
+    JWT_AVAILABLE = True
+except ImportError:
+    JWT_AVAILABLE = False
+    print("Warning: PyJWT not available, using simple token fallback")
+
+app = FastAPI(title="NCP API", version="3.0.0")
+security = HTTPBearer(auto_error=False)
+
+# Data storage
+DATA_DIR = "/var/lib/ncp"
+CONTAINERS_DB_FILE = f"{DATA_DIR}/containers.json"
+USERS_DB_FILE = f"{DATA_DIR}/users.json"
+
+NETWORK_CONFIG = {
+    "subnet": "10.100.0.0/16",
+    "gateway": "10.100.0.1",
+}
+
+# JWT settings
+JWT_SECRET = os.environ.get("NCP_JWT_SECRET", secrets.token_hex(32))
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24
+
+# Models
+class UserRegister(BaseModel):
+    username: str
+    password: str
+    email: Optional[str] = None
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class UserInfo(BaseModel):
+    username: str
+    email: Optional[str] = None
+    created_at: str
 
 class ContainerSpec(BaseModel):
     name: str
@@ -34,31 +75,115 @@ class ContainerInfo(BaseModel):
     ip: Optional[str] = None
     host_port: Optional[int] = None
     created_at: str
+    owner: Optional[str] = None
 
-DATA_DIR = "/var/lib/ncp"
-CONTAINERS_DB_FILE = f"{DATA_DIR}/containers.json"
-
-NETWORK_CONFIG = {
-    "subnet": "10.100.0.0/16",
-    "gateway": "10.100.0.1",
-}
-
-def load_db() -> Dict[str, Any]:
-    if os.path.exists(CONTAINERS_DB_FILE):
+# Database functions
+def load_db(filepath: str) -> Dict[str, Any]:
+    if os.path.exists(filepath):
         try:
-            with open(CONTAINERS_DB_FILE, 'r') as f:
+            with open(filepath, 'r') as f:
                 return json.load(f)
         except:
             return {}
     return {}
 
-def save_db(db: Dict[str, Any]):
+def save_db(filepath: str, db: Dict[str, Any]):
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(CONTAINERS_DB_FILE, 'w') as f:
+    with open(filepath, 'w') as f:
         json.dump(db, f, indent=2)
 
-containers_db: Dict[str, Any] = load_db()
+def hash_password(password: str) -> str:
+    """Hash a password using SHA-256 with salt"""
+    salt = secrets.token_hex(16)
+    pwdhash = hashlib.sha256((password + salt).encode()).hexdigest()
+    return f"{salt}${pwdhash}"
 
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against its hash"""
+    try:
+        salt, stored_hash = hashed.split('$')
+        pwdhash = hashlib.sha256((password + salt).encode()).hexdigest()
+        return pwdhash == stored_hash
+    except:
+        return False
+
+def create_token(username: str) -> str:
+    """Create JWT token for user"""
+    if JWT_AVAILABLE:
+        payload = {
+            "sub": username,
+            "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+            "iat": datetime.utcnow(),
+        }
+        return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    else:
+        # Simple fallback token
+        return f"ncp_{username}_{secrets.token_hex(16)}"
+
+def verify_token(token: str) -> Optional[str]:
+    """Verify token and return username"""
+    if not token:
+        return None
+    
+    if JWT_AVAILABLE:
+        try:
+            # Remove Bearer prefix if present
+            if token.startswith("Bearer "):
+                token = token[7:]
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            return payload.get("sub")
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except jwt.InvalidTokenError:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    else:
+        # Simple fallback
+        if token.startswith("ncp_"):
+            parts = token.split("_")
+            if len(parts) >= 2:
+                return parts[1]
+        return None
+
+# Load databases
+containers_db: Dict[str, Any] = load_db(CONTAINERS_DB_FILE)
+users_db: Dict[str, Any] = load_db(USERS_DB_FILE)
+
+# Auth dependency
+async def get_current_user(authorization: Optional[str] = Header(None)) -> Optional[str]:
+    """Extract username from Authorization header"""
+    if not authorization:
+        return None
+    return verify_token(authorization)
+
+async def require_user(authorization: Optional[str] = Header(None)) -> str:
+    """Require authentication, raise 401 if missing"""
+    user = await get_current_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+def check_container_access(name: str, username: str):
+    """Check if user owns the container or is admin"""
+    info = containers_db.get(name, {})
+    owner = info.get("owner")
+    
+    # Admin can access all
+    if username == "admin":
+        return True
+    
+    # Owner can access their own
+    if owner == username:
+        return True
+    
+    # No owner set - first access claims it (for migration)
+    if not owner:
+        containers_db[name]["owner"] = username
+        save_db(CONTAINERS_DB_FILE, containers_db)
+        return True
+    
+    raise HTTPException(status_code=403, detail=f"Access denied: container '{name}' is owned by '{owner}'")
+
+# Command utilities
 def run_cmd(cmd: List[str], capture=True, timeout=300, cwd: Optional[str] = None) -> tuple:
     try:
         if capture:
@@ -99,6 +224,31 @@ def find_next_available_ip() -> Optional[str]:
                 return ip
     return None
 
+def build_container_config(name: str, ip: str, user_config: str) -> str:
+    """Build complete container Nix config from user snippet"""
+    # Clean up the config - remove automatic attributes that nixos-container sets
+    cleaned_config = user_config.strip()
+    
+    # Remove boot.isContainer if present (nixos-container sets this)
+    cleaned_config = re.sub(r'\s*boot\.isContainer\s*=\s*[^;]+;\s*', '\n', cleaned_config)
+    # Remove networking.hostName if present
+    cleaned_config = re.sub(r'\s*networking\.hostName\s*=\s*[^;]+;\s*', '\n', cleaned_config)
+    # Remove networking.useDHCP if present
+    cleaned_config = re.sub(r'\s*networking\.useDHCP\s*=\s*[^;]+;\s*', '\n', cleaned_config)
+    
+    return f'''
+{{ config, lib, pkgs, ... }}:
+
+{{
+  services.openssh.enable = true;
+  users.users.root.initialPassword = "root";
+  
+  {cleaned_config}
+  
+  system.stateVersion = "24.11";
+}}
+'''
+
 def setup_port_forward(host_port: int, container_ip: str, container_port: int):
     run_cmd([
         "iptables", "-t", "nat", "-A", "PREROUTING",
@@ -125,136 +275,280 @@ def remove_port_forward(host_port: int, container_ip: str, container_port: int):
         "-j", "MASQUERADE"
     ])
 
-def build_container_config(name: str, ip: str, user_config: str) -> str:
-    """Build a NixOS container configuration string (just the body, not a function)"""
-    cleaned_config = user_config.strip()
-    # If user wrapped in { }, extract just the body
-    if cleaned_config.startswith('{') and cleaned_config.endswith('}'):
-        # Count braces to find matching end
-        depth = 0
-        end_pos = 0
-        for i, c in enumerate(cleaned_config):
-            if c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    end_pos = i
-                    break
-        cleaned_config = cleaned_config[1:end_pos].strip()
+# ============ AUTH ENDPOINTS ============
+
+@app.post("/api/v1/auth/register")
+async def register(creds: UserRegister):
+    """Register a new user"""
+    if not re.match(r'^[a-zA-Z0-9_-]{3,32}$', creds.username):
+        raise HTTPException(status_code=400, detail="Username must be 3-32 alphanumeric characters")
     
-    return f'''
-  networking.useHostResolvConf = false;
-  
-  networking.interfaces.eth0 = {{
-    ipv4.addresses = [{{
-      address = "{ip}";
-      prefixLength = 16;
-    }}];
-  }};
-  networking.defaultGateway = "{NETWORK_CONFIG['gateway']}";
-  networking.nameservers = [ "8.8.8.8" "1.1.1.1" ];
-  
-  services.openssh.enable = true;
-  users.users.root.initialPassword = "root";
-  
-  {cleaned_config}
-  
-  system.stateVersion = "24.11";
-'''
+    if len(creds.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    
+    if creds.username in users_db:
+        raise HTTPException(status_code=409, detail="Username already exists")
+    
+    users_db[creds.username] = {
+        "username": creds.username,
+        "password_hash": hash_password(creds.password),
+        "email": creds.email,
+        "created_at": datetime.now().isoformat(),
+        "is_admin": False
+    }
+    save_db(USERS_DB_FILE, users_db)
+    
+    return {"message": "User registered successfully", "username": creds.username}
+
+@app.post("/api/v1/auth/login")
+async def login(creds: UserLogin):
+    """Login and get JWT token"""
+    user = users_db.get(creds.username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    if not verify_password(creds.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    token = create_token(creds.username)
+    
+    return {
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": JWT_EXPIRATION_HOURS * 3600,
+        "username": creds.username
+    }
+
+@app.get("/api/v1/auth/me", response_model=UserInfo)
+async def get_me(user: str = Depends(require_user)):
+    """Get current user info"""
+    user_data = users_db.get(user, {})
+    return UserInfo(
+        username=user,
+        email=user_data.get("email"),
+        created_at=user_data.get("created_at", "unknown")
+    )
+
+# ============ CONTAINER ENDPOINTS (Authenticated) ============
 
 @app.get("/")
-async def root():
-    """Serve HTML page with container list"""
+async def root(user: Optional[str] = Depends(get_current_user)):
+    """Serve HTML page with container list - shows user's containers or public view"""
+    # Get containers accessible to this user
+    all_names = get_all_containers()
     containers = []
-    for name in get_all_containers():
-        status = get_container_status(name)
-        info = containers_db.get(name, {})
-        containers.append({
-            "name": name,
-            "status": status,
-            "ip": info.get("ip", "-"),
-            "port": info.get("host_port", "-"),
-        })
     
-    html = """<!DOCTYPE html>
+    for name in all_names:
+        info = containers_db.get(name, {})
+        owner = info.get("owner")
+        
+        # Show if: public, owned by user, or user is admin
+        if not user:
+            # Public view - only show unowned containers
+            if not owner:
+                status = get_container_status(name)
+                containers.append({
+                    "name": name,
+                    "status": status,
+                    "ip": info.get("ip", "-"),
+                    "port": info.get("host_port", "-"),
+                    "owner": owner or "unclaimed"
+                })
+        elif user == "admin" or owner == user or not owner:
+            status = get_container_status(name)
+            containers.append({
+                "name": name,
+                "status": status,
+                "ip": info.get("ip", "-"),
+                "port": info.get("host_port", "-"),
+                "owner": owner or "unclaimed"
+            })
+    
+    auth_section = ""
+    if user:
+        auth_section = f"<p>👤 Logged in as: <b>{user}</b> | <a href='/api/v1/auth/me'>Profile</a></p>"
+    else:
+        auth_section = """<p>🔒 <a href="#" onclick="document.getElementById('login-form').style.display='block';return false">Login</a> or 
+        <a href="#" onclick="document.getElementById('register-form').style.display='block';return false">Register</a></p>
+        <div id="login-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;">
+            <h4>Login</h4>
+            <input type="text" id="login-user" placeholder="Username"><br>
+            <input type="password" id="login-pass" placeholder="Password"><br>
+            <button onclick="doLogin()">Login</button>
+        </div>
+        <div id="register-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;">
+            <h4>Register</h4>
+            <input type="text" id="reg-user" placeholder="Username"><br>
+            <input type="password" id="reg-pass" placeholder="Password"><br>
+            <input type="email" id="reg-email" placeholder="Email (optional)"><br>
+            <button onclick="doRegister()">Register</button>
+        </div>"""
+    
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>NCP - Nix Container Platform</title>
+    <meta charset="utf-8">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f5f5f5; }
-        h1 { color: #333; border-bottom: 3px solid #007acc; padding-bottom: 10px; }
-        .container { background: white; border-radius: 8px; padding: 20px; margin: 10px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .container h3 { margin-top: 0; color: #007acc; }
-        .status { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
-        .up { background: #d4edda; color: #155724; }
-        .down { background: #f8d7da; color: #721c24; }
-        .info { color: #666; font-size: 0.9em; }
-        .empty { text-align: center; color: #666; padding: 40px; }
-        .endpoint { background: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 30px; }
-        code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
-        pre { background: #f4f4f4; padding: 15px; overflow-x: auto; border-radius: 5px; }
+        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f5f5f5; }}
+        h1 {{ color: #333; border-bottom: 3px solid #007acc; padding-bottom: 10px; }}
+        .container {{ background: white; border-radius: 8px; padding: 20px; margin: 10px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .container h3 {{ margin-top: 0; color: #007acc; }}
+        .status {{ display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }}
+        .up {{ background: #d4edda; color: #155724; }}
+        .down {{ background: #f8d7da; color: #721c24; }}
+        .info {{ color: #666; font-size: 0.9em; }}
+        .owner {{ font-size: 0.8em; color: #999; background: #f0f0f0; padding: 2px 8px; border-radius: 10px; }}
+        .empty {{ text-align: center; color: #666; padding: 40px; }}
+        .endpoint {{ background: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 30px; }}
+        .auth-box {{ background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+        code {{ background: #e9ecef; padding: 2px 6px; border-radius: 3px; font-family: monospace; }}
+        pre {{ background: #f4f4f4; padding: 15px; overflow-x: auto; border-radius: 5px; }}
+        input {{ margin: 5px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
+        button {{ background: #007acc; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin: 5px; }}
+        button:hover {{ background: #005fa3; }}
     </style>
 </head>
 <body>
     <h1>🚀 NCP - Nix Container Platform</h1>
     <p>Dynamic NixOS container deployment on nix.latha.org</p>
+    
+    <div class="auth-box">
+        {auth_section}
+    </div>
 """
     
     if containers:
         for c in containers:
             status_class = "up" if c["status"] == "up" else "down"
             port_str = f":{c['port']}" if c["port"] != "-" else ""
-            # Create link if container has an exposed port
+            owner_badge = f"<span class=\"owner\">👤 {c['owner']}</span>"
+            
             if c["port"] != "-":
                 service_url = f"http://204.168.220.202:{c['port']}"
                 name_html = f'<a href="{service_url}" target="_blank" style="text-decoration: none; color: #007acc;">{c["name"]}</a>'
             else:
                 name_html = c['name']
+            
             html += f"""
     <div class="container">
-        <h3>{name_html}</h3>
+        <h3>{name_html} {owner_badge}</h3>
         <span class="status {status_class}">{c['status']}</span>
         <p class="info">IP: {c['ip']}{port_str}</p>
     </div>
 """
     else:
-        html += '<div class="empty"><p>No containers running</p><p>Deploy one with: <code>ncp deploy-demo</code></p></div>'
+        html += '<div class="empty"><p>No containers visible</p><p>Login to see your containers</p></div>'
     
     html += """
     <div class="endpoint">
         <h3>API Endpoints</h3>
-        <pre>GET  /api/v1/containers       - List containers
-POST /api/v1/containers       - Create container
+        <pre>POST /api/v1/auth/register   - Register new user
+POST /api/v1/auth/login      - Login, get token
+GET  /api/v1/auth/me         - Get current user
+GET  /api/v1/containers      - List your containers
+POST /api/v1/containers      - Create container
 GET  /api/v1/containers/{name} - Container details
 POST /api/v1/containers/{name}/restart - Restart
 DELETE /api/v1/containers/{name} - Destroy</pre>
     </div>
+    
+    <script>
+        async function doLogin() {
+            const username = document.getElementById('login-user').value;
+            const password = document.getElementById('login-pass').value;
+            try {
+                const res = await fetch('/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username, password})
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    localStorage.setItem('ncp_token', data.access_token);
+                    alert('Login successful!');
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.detail);
+                }
+            } catch(e) {
+                alert('Error: ' + e.message);
+            }
+        }
+        
+        async function doRegister() {
+            const username = document.getElementById('reg-user').value;
+            const password = document.getElementById('reg-pass').value;
+            const email = document.getElementById('reg-email').value || null;
+            try {
+                const res = await fetch('/api/v1/auth/register', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username, password, email})
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    alert('Registered! Please login.');
+                    document.getElementById('register-form').style.display='none';
+                } else {
+                    alert('Error: ' + data.detail);
+                }
+            } catch(e) {
+                alert('Error: ' + e.message);
+            }
+        }
+        
+        // Add token to all API requests if logged in
+        const token = localStorage.getItem('ncp_token');
+        if (token) {
+            const originalFetch = window.fetch;
+            window.fetch = function() {
+                let args = Array.from(arguments);
+                if (args[0].startsWith('/api/') && args.length > 1) {
+                    args[1].headers = args[1].headers || {};
+                    args[1].headers['Authorization'] = 'Bearer ' + token;
+                }
+                return originalFetch.apply(this, args);
+            };
+        }
+    </script>
 </body>
 </html>"""
     
     return HTMLResponse(content=html)
 
 @app.get("/api/v1/containers", response_model=List[ContainerInfo])
-async def list_containers():
+async def list_containers(user: str = Depends(require_user)):
+    """List containers accessible to the authenticated user"""
     names = get_all_containers()
     containers = []
+    
     for name in names:
-        status = get_container_status(name)
         info = containers_db.get(name, {})
-        containers.append(ContainerInfo(
-            name=name,
-            status=status,
-            ip=info.get("ip"),
-            host_port=info.get("host_port"),
-            created_at=info.get("created_at", "unknown")
-        ))
+        owner = info.get("owner")
+        
+        # Show if: user is admin, user owns it, or unowned
+        if user == "admin" or owner == user or not owner:
+            status = get_container_status(name)
+            containers.append(ContainerInfo(
+                name=name,
+                status=status,
+                ip=info.get("ip"),
+                host_port=info.get("host_port"),
+                created_at=info.get("created_at", "unknown"),
+                owner=owner
+            ))
+    
     return containers
 
 @app.post("/api/v1/containers", response_model=ContainerInfo)
-async def create_container(spec: ContainerSpec):
+async def create_container(spec: ContainerSpec, user: str = Depends(require_user)):
+    """Create a new container owned by the current user"""
     if not re.match(r'^[a-zA-Z0-9_-]+$', spec.name):
         raise HTTPException(status_code=400, detail="Invalid container name")
+    
+    if len(spec.name) > 12:
+        raise HTTPException(status_code=400, detail="Container name too long (max 12 chars)")
     
     existing = get_all_containers()
     if spec.name in existing:
@@ -270,7 +564,7 @@ async def create_container(spec: ContainerSpec):
         # Build container config
         container_config = build_container_config(spec.name, spec.ip, spec.nix_config)
         
-        # Create container with inline config - let nixos-container handle the build
+        # Create container with inline config
         stdout, stderr, rc = run_cmd([
             "nixos-container", "create", spec.name,
             "--config", container_config,
@@ -287,7 +581,6 @@ async def create_container(spec: ContainerSpec):
         ], timeout=60)
         
         if rc != 0:
-            # Try to get status even if start failed
             status = get_container_status(spec.name)
             if status != "up":
                 raise Exception(f"Container start failed: {stderr}")
@@ -296,16 +589,17 @@ async def create_container(spec: ContainerSpec):
         if spec.host_port:
             setup_port_forward(spec.host_port, spec.ip, spec.container_port)
         
-        # Save metadata
+        # Save metadata with owner
         containers_db[spec.name] = {
             "ip": spec.ip,
             "host_port": spec.host_port,
             "container_port": spec.container_port,
             "created_at": datetime.now().isoformat(),
             "config": spec.nix_config,
-            "status": "up"
+            "status": "up",
+            "owner": user  # <-- Ownership tracking
         }
-        save_db(containers_db)
+        save_db(CONTAINERS_DB_FILE, containers_db)
         
     except Exception as e:
         # Cleanup on failure
@@ -318,13 +612,14 @@ async def create_container(spec: ContainerSpec):
         status="up",
         ip=spec.ip,
         host_port=spec.host_port,
-        created_at=containers_db[spec.name]["created_at"]
+        created_at=containers_db[spec.name]["created_at"],
+        owner=user
     )
 
 @app.get("/api/v1/containers/{name}", response_model=ContainerInfo)
-async def get_container(name: str):
-    if name not in get_all_containers():
-        raise HTTPException(status_code=404, detail=f"Container {name} not found")
+async def get_container(name: str, user: str = Depends(require_user)):
+    """Get container details - checks ownership"""
+    check_container_access(name, user)  # <-- Authorization check
     
     status = get_container_status(name)
     info = containers_db.get(name, {})
@@ -334,95 +629,87 @@ async def get_container(name: str):
         status=status,
         ip=info.get("ip"),
         host_port=info.get("host_port"),
-        created_at=info.get("created_at", "unknown")
+        created_at=info.get("created_at", "unknown"),
+        owner=info.get("owner")
     )
 
 @app.post("/api/v1/containers/{name}/restart")
-async def restart_container(name: str):
-    if name not in get_all_containers():
-        raise HTTPException(status_code=404, detail=f"Container {name} not found")
+async def restart_container(name: str, user: str = Depends(require_user)):
+    """Restart a container - checks ownership"""
+    check_container_access(name, user)  # <-- Authorization check
     
-    run_cmd(["nixos-container", "stop", name], timeout=30)
-    stdout, stderr, rc = run_cmd(["nixos-container", "start", name], timeout=30)
+    stdout, stderr, rc = run_cmd(["nixos-container", "restart", name], timeout=120)
     
     if rc != 0:
-        raise HTTPException(status_code=500, detail=f"Failed to start: {stderr}")
+        raise HTTPException(status_code=500, detail=f"Restart failed: {stderr}")
     
-    return {"name": name, "action": "restart", "new_status": get_container_status(name)}
+    return {"message": f"Container {name} restarted"}
 
 @app.delete("/api/v1/containers/{name}")
-async def destroy_container(name: str):
-    if name not in get_all_containers():
-        raise HTTPException(status_code=404, detail=f"Container {name} not found")
+async def destroy_container(name: str, user: str = Depends(require_user)):
+    """Destroy a container - checks ownership"""
+    check_container_access(name, user)  # <-- Authorization check
+    
+    info = containers_db.get(name, {})
     
     # Remove port forwarding
-    info = containers_db.get(name, {})
     if info.get("host_port") and info.get("ip"):
         remove_port_forward(info["host_port"], info["ip"], info.get("container_port", 80))
     
-    stdout, stderr, rc = run_cmd(["nixos-container", "destroy", name], timeout=60)
-    if rc != 0:
-        raise HTTPException(status_code=500, detail=f"Failed to destroy: {stderr}")
+    stdout, stderr, rc = run_cmd(["nixos-container", "destroy", name], timeout=120)
     
+    if rc != 0:
+        raise HTTPException(status_code=500, detail=f"Destroy failed: {stderr}")
+    
+    # Remove from database
     if name in containers_db:
         del containers_db[name]
-        save_db(containers_db)
+        save_db(CONTAINERS_DB_FILE, containers_db)
     
-    return {"name": name, "action": "destroyed"}
+    return {"message": f"Container {name} destroyed"}
 
-@app.get("/api/v1/containers/{name}/logs")
-async def container_logs(name: str, follow: bool = False, lines: int = 100):
-    if name not in get_all_containers():
-        raise HTTPException(status_code=404, detail=f"Container {name} not found")
+# Admin endpoints
+@app.get("/api/v1/admin/users")
+async def list_users(user: str = Depends(require_user)):
+    """List all users (admin only)"""
+    if user != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     
-    def log_generator():
-        cmd = ["nixos-container", "run", name, "--", "journalctl"]
-        if follow:
-            cmd.extend(["-f"])
-        else:
-            cmd.extend(["-n", str(lines)])
-        
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        try:
-            for line in process.stdout:
-                yield line
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except:
-                process.kill()
+    return [{"username": u, "email": data.get("email"), "created_at": data.get("created_at")} 
+            for u, data in users_db.items()]
+
+@app.get("/api/v1/admin/containers")
+async def list_all_containers(user: str = Depends(require_user)):
+    """List all containers with owners (admin only)"""
+    if user != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     
-    return StreamingResponse(log_generator(), media_type="text/plain")
-
-@app.get("/docs-ui", response_class=HTMLResponse)
-async def docs_ui():
-    return """<!DOCTYPE html>
-<html>
-<head><title>NCP API</title><style>
-body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px}
-code{background:#f4f4f4;padding:2px 6px;border-radius:3px}
-pre{background:#f4f4f4;padding:15px;overflow-x:auto;border-radius:5px}
-.endpoint{margin:20px 0;padding:15px;border-left:4px solid #007acc;background:#f9f9f9}
-.method{font-weight:bold;color:#007acc}
-</style></head>
-<body>
-<h1>🚀 NCP API</h1>
-<p>Dynamic NixOS container deployment</p>
-
-<h2>Endpoints</h2>
-<div class="endpoint"><span class="method">GET</span> /api/v1/containers - List containers</div>
-<div class="endpoint"><span class="method">POST</span> /api/v1/containers - Create container</div>
-<div class="endpoint"><span class="method">GET</span> /api/v1/containers/{name} - Container details</div>
-<div class="endpoint"><span class="method">POST</span> /api/v1/containers/{name}/restart - Restart</div>
-<div class="endpoint"><span class="method">DELETE</span> /api/v1/containers/{name} - Destroy</div>
-
-<h2>Example</h2>
-<pre>curl -X POST https://nix.latha.org/api/api/v1/containers \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"myapp","nix_config":"{services.nginx.enable=true;}","host_port":8080}'</pre>
-</body>
-</html>"""
+    names = get_all_containers()
+    containers = []
+    for name in names:
+        status = get_container_status(name)
+        info = containers_db.get(name, {})
+        containers.append(ContainerInfo(
+            name=name,
+            status=status,
+            ip=info.get("ip"),
+            host_port=info.get("host_port"),
+            created_at=info.get("created_at", "unknown"),
+            owner=info.get("owner", "unclaimed")
+        ))
+    return containers
 
 if __name__ == "__main__":
+    # Create admin user if none exists
+    if "admin" not in users_db:
+        users_db["admin"] = {
+            "username": "admin",
+            "password_hash": hash_password("admin123"),  # Change this!
+            "email": "admin@nix.latha.org",
+            "created_at": datetime.now().isoformat(),
+            "is_admin": True
+        }
+        save_db(USERS_DB_FILE, users_db)
+        print("Created default admin user (admin/admin123)")
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)

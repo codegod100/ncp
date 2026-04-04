@@ -160,7 +160,7 @@ in {
 
   environment.systemPackages = with pkgs; [
     nixos-container systemd iproute2 iptables bridge-utils tcpdump curl jq htop vim git socat
-    (python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic requests ]))
+    (python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic requests pyjwt ]))
   ];
 
   environment.etc."ncp-tools.sh".source = pkgs.writeShellScript "ncp-tools" ''
