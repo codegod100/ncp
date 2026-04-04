@@ -41,9 +41,28 @@ NETWORK_CONFIG = {
 }
 
 # JWT settings
-JWT_SECRET = os.environ.get("NCP_JWT_SECRET", secrets.token_hex(32))
+JWT_SECRET_FILE = f"{DATA_DIR}/jwt_secret"
+
+def get_jwt_secret() -> str:
+    """Get or create persistent JWT secret"""
+    if os.environ.get("NCP_JWT_SECRET"):
+        return os.environ.get("NCP_JWT_SECRET")
+    
+    if os.path.exists(JWT_SECRET_FILE):
+        with open(JWT_SECRET_FILE, 'r') as f:
+            return f.read().strip()
+    
+    # Generate new secret and save it
+    new_secret = secrets.token_hex(32)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(JWT_SECRET_FILE, 'w') as f:
+        f.write(new_secret)
+    os.chmod(JWT_SECRET_FILE, 0o600)
+    return new_secret
+
+JWT_SECRET = get_jwt_secret()
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
+JWT_EXPIRATION_HOURS = 24 * 7  # 7 days for convenience
 
 # Models
 class UserRegister(BaseModel):
