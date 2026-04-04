@@ -259,9 +259,6 @@ async def root_page(request: Request):
     '''
     
     return HTMLResponse(content=generate_html_page("Containers", body))
-    '''
-    
-    return HTMLResponse(content=generate_html_page("Containers", body))
 
 
 # API Endpoints
