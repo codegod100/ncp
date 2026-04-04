@@ -28,7 +28,7 @@
             enable = true;
             virtualHosts.default = {
               default = true;
-              locations."/".return = ''200 <h1>Frontend</h1><p>Hello!</p>'';
+              locations."/".return = "200 " + builtins.readFile ./frontend.html;
             };
           };
           networking.firewall.allowedTCPPorts = [ 80 ];
