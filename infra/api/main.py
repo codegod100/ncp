@@ -225,41 +225,22 @@ def find_next_available_ip() -> Optional[str]:
     return None
 
 def build_container_config(name: str, ip: str, user_config: str) -> str:
-    """Build complete container Nix config from user snippet"""
+    """Clean up user config for nixos-container --config"""
     cleaned_config = user_config.strip()
     
-    # Remove boot.isContainer if present (nixos-container sets this)
+    # Remove attributes that nixos-container sets automatically
     cleaned_config = re.sub(r'\s*boot\.isContainer\s*=\s*[^;]+;\s*', '\n', cleaned_config)
-    # Remove networking.hostName if present
     cleaned_config = re.sub(r'\s*networking\.hostName\s*=\s*[^;]+;\s*', '\n', cleaned_config)
-    # Remove networking.useDHCP if present
     cleaned_config = re.sub(r'\s*networking\.useDHCP\s*=\s*[^;]+;\s*', '\n', cleaned_config)
     
-    # Check if user_config is already a complete Nix expression (starts with {)
-    if cleaned_config.startswith('{'):
-        # User provided full config - just add our required settings
-        return f'''{{ config, lib, pkgs, ... }}:
-
-{{
-  services.openssh.enable = true;
-  users.users.root.initialPassword = "root";
-{cleaned_config}
-  system.stateVersion = "24.11";
-}}
-'''
-    else:
-        # User provided just attribute contents
-        return f'''{{ config, lib, pkgs, ... }}:
-
-{{
-  services.openssh.enable = true;
-  users.users.root.initialPassword = "root";
-  
-  {cleaned_config}
-  
-  system.stateVersion = "24.11";
-}}
-'''
+    # nixos-container wraps the config, so we just return the inner content
+    # If user provided { ... }, extract contents; otherwise use as-is
+    if cleaned_config.startswith('{') and cleaned_config.endswith('}'):
+        # Extract inner content (attributes between braces)
+        inner = cleaned_config[1:-1].strip()
+        return inner
+    
+    return cleaned_config
 
 def setup_port_forward(host_port: int, container_ip: str, container_port: int):
     run_cmd([
