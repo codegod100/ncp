@@ -70,7 +70,7 @@ def clear_token():
     save_config(config)
 
 class NCPClient:
-    """Client for the Nix-Fly API"""
+    """Client for the Nix Container Platform API"""
     
     def __init__(self, base_url: str = DEFAULT_API_URL, token: Optional[str] = None):
         self.base_url = base_url.rstrip('/')
@@ -142,7 +142,7 @@ class NCPClient:
 
 @click.group()
 @click.option('--api-url', envvar='NCP_API_URL', default=DEFAULT_API_URL,
-              help='Nix-Fly API URL (default: https://nix.latha.org/fly)')
+              help='Nix Container Platform API URL (default: https://nix.latha.org)')
 @click.option('--token', envvar='NCP_TOKEN',
               help='API authentication token')
 @click.pass_context
