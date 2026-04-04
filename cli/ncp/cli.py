@@ -297,9 +297,12 @@ def deploy(ctx, project):
     click.echo(f"   📁 {len(files)} files to deploy")
     click.echo(f"   ⏳ Sending to server for build...")
     
+    # Use basename as project name (server doesn't need full path)
+    project_name = os.path.basename(os.path.normpath(project))
+    
     # Send to server
     try:
-        result = client.deploy_project(project, files)
+        result = client.deploy_project(project_name, files)
         
         click.echo(f"✅ Project deployed!")
         
