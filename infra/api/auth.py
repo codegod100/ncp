@@ -7,9 +7,9 @@ import jwt
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from db import users_db, load_db, save_db, USERS_DB_FILE
+from db import users_db, load_db, save_db, USERS_DB_FILE, DATA_DIR
 
-SECRET_FILE = "/var/lib/ncp/jwt_secret"
+SECRET_FILE = os.path.join(DATA_DIR, "jwt_secret")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 

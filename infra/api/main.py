@@ -6,13 +6,32 @@ import tempfile
 import shutil
 import subprocess
 import json
+import logging
+import sys
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
+
+# Setup logging before anything else
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("ncp-api")
+logger.info("=" * 60)
+logger.info("NCP API Starting up")
+logger.info("=" * 60)
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 import uvicorn
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import our modules
 import db
@@ -26,6 +45,24 @@ from auth import (
     init_default_admin, hash_password, verify_password, create_access_token,
     require_user, optional_user
 )
+
+# Config from environment
+NCP_USER = os.getenv("NCP_USER", "nandi")
+NCP_USER_HOME = os.getenv("NCP_USER_HOME", f"/home/{NCP_USER}")
+NIXBUILD_SSH_KEY_NAME = os.getenv("NIXBUILD_SSH_KEY_NAME", "id_ed25519_nixbuild")
+NIXBUILD_SSH_USER = os.getenv("NIXBUILD_SSH_USER", NCP_USER)
+NIXBUILD_HOST = os.getenv("NIXBUILD_HOST", "eu.nixbuild.net")
+NIXBUILD_MAX_JOBS = os.getenv("NIXBUILD_MAX_JOBS", "100")
+NIXBUILD_FEATURES = os.getenv("NIXBUILD_FEATURES", "benchmark,big-parallel")
+NIX_MACHINES_FILE = os.getenv("NIX_MACHINES_FILE", "/etc/nix/machines")
+
+# Network settings
+CONTAINER_SUBNET = os.getenv("CONTAINER_SUBNET", "10.100.0.0/16")
+CONTAINER_HOST_IP = os.getenv("CONTAINER_HOST_IP", "10.100.0.1")
+
+# API settings
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8000"))
 
 app = FastAPI(title="NCP API", version="1.0.0")
 
@@ -42,89 +79,239 @@ init_db()
 
 
 # Utility functions
-def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[str, str, int]:
+def run_cmd(cmd: List[str], timeout: int = 30, description: str = None) -> Tuple[str, str, int]:
     """Run shell command and return stdout, stderr, returncode."""
+    cmd_str = ' '.join(cmd)
+    desc = f" [{description}]" if description else ""
+    logger.info(f"[CMD{desc}] $ {cmd_str} (timeout={timeout}s)")
+    start = datetime.now()
+    
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        elapsed = (datetime.now() - start).total_seconds()
+        
+        if result.returncode == 0:
+            logger.info(f"[CMD{desc}] ✓ Success in {elapsed:.1f}s")
+            if result.stdout:
+                logger.debug(f"[CMD{desc}] stdout: {result.stdout[:500]}")
+        else:
+            logger.warning(f"[CMD{desc}] ✗ Failed (code={result.returncode}) in {elapsed:.1f}s")
+            if result.stderr:
+                logger.warning(f"[CMD{desc}] stderr: {result.stderr[:500]}")
+        
         return result.stdout, result.stderr, result.returncode
+        
     except subprocess.TimeoutExpired:
+        elapsed = (datetime.now() - start).total_seconds()
+        logger.error(f"[CMD{desc}] ⏱ TIMEOUT after {elapsed:.1f}s (limit was {timeout}s)")
         return "", f"Command timed out after {timeout}s", -1
+        
     except Exception as e:
+        elapsed = (datetime.now() - start).total_seconds()
+        logger.error(f"[CMD{desc}] 💥 Exception after {elapsed:.1f}s: {e}")
         return "", str(e), -1
 
 
 def get_all_containers() -> List[str]:
     """Get list of all nixos containers."""
-    stdout, _, _ = run_cmd(["nixos-container", "list"], timeout=5)
-    return [name.strip() for name in stdout.strip().split('\n') if name.strip()]
+    logger.debug("[CONTAINERS] Listing all nixos containers...")
+    stdout, _, _ = run_cmd(["nixos-container", "list"], timeout=5, description="list-containers")
+    containers = [name.strip() for name in stdout.strip().split('\n') if name.strip()]
+    logger.info(f"[CONTAINERS] Found {len(containers)} containers: {containers}")
+    return containers
 
 
 def get_container_status(name: str) -> str:
     """Get container status (up/down)."""
-    stdout, _, rc = run_cmd(["nixos-container", "status", name], timeout=10)
-    return "up" if rc == 0 and "up" in stdout else "down"
+    logger.debug(f"[STATUS] Checking status of container '{name}'...")
+    stdout, _, rc = run_cmd(["nixos-container", "status", name], timeout=10, description=f"status-{name}")
+    status = "up" if rc == 0 and "up" in stdout else "down"
+    logger.debug(f"[STATUS] Container '{name}' is {status}")
+    return status
 
 
 def get_container_ip(name: str) -> Optional[str]:
     """Get container IP."""
-    stdout, _, rc = run_cmd(["nixos-container", "show-ip", name], timeout=10)
-    return stdout.strip() if rc == 0 else None
+    logger.debug(f"[IP] Getting IP for container '{name}'...")
+    stdout, _, rc = run_cmd(["nixos-container", "show-ip", name], timeout=10, description=f"ip-{name}")
+    ip = stdout.strip() if rc == 0 else None
+    if ip:
+        logger.debug(f"[IP] Container '{name}' has IP: {ip}")
+    else:
+        logger.warning(f"[IP] Could not get IP for container '{name}'")
+    return ip
+
+
+def setup_nixbuild_net() -> Tuple[bool, str]:
+    """Configure nixbuild.net as a remote builder on the server."""
+    logger.info(f"[NIXBUILD] Setting up nixbuild.net remote builder...")
+    logger.info(f"[NIXBUILD] Host: {NIXBUILD_HOST}, User: {NIXBUILD_SSH_USER}, MaxJobs: {NIXBUILD_MAX_JOBS}")
+    
+    # Check if already configured
+    if os.path.exists(NIX_MACHINES_FILE):
+        with open(NIX_MACHINES_FILE, 'r') as f:
+            if NIXBUILD_HOST in f.read():
+                logger.info(f"[NIXBUILD] Already configured - skipping")
+                return True, f"{NIXBUILD_HOST} already configured"
+    
+    # Copy existing SSH key from user's home
+    user_ssh_key = os.path.join(NCP_USER_HOME, ".ssh", NIXBUILD_SSH_KEY_NAME)
+    ssh_key_path = f"/root/.ssh/{NIXBUILD_SSH_KEY_NAME}"
+    ssh_dir = "/root/.ssh"
+    
+    try:
+        # Check if user has the key
+        if not os.path.exists(user_ssh_key):
+            logger.error(f"[NIXBUILD] SSH key not found: {user_ssh_key}")
+            return False, f"No existing nixbuild key found at {user_ssh_key}"
+        
+        logger.info(f"[NIXBUILD] Found SSH key at {user_ssh_key}")
+        
+        # Create SSH directory
+        os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+        logger.info(f"[NIXBUILD] Created SSH directory: {ssh_dir}")
+        
+        # Copy the key
+        shutil.copy2(user_ssh_key, ssh_key_path)
+        shutil.copy2(user_ssh_key + ".pub", ssh_key_path + ".pub")
+        os.chmod(ssh_key_path, 0o600)
+        logger.info(f"[NIXBUILD] Copied SSH key to {ssh_key_path}")
+        
+        # Setup known_hosts
+        known_hosts = os.path.join(ssh_dir, "known_hosts")
+        nixbuild_key = f"{NIXBUILD_HOST} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPIQCZc54poJ8vqawd8TraNryQeJnvH1eLpIDgbiqymM"
+        
+        if not os.path.exists(known_hosts) or nixbuild_key not in open(known_hosts).read():
+            with open(known_hosts, 'a') as f:
+                f.write(nixbuild_key + "\n")
+            os.chmod(known_hosts, 0o644)
+            logger.info(f"[NIXBUILD] Added {NIXBUILD_HOST} to known_hosts")
+        
+        # Setup SSH config
+        ssh_config = os.path.join(ssh_dir, "config")
+        nixbuild_config = f"""Host {NIXBUILD_HOST}
+  User {NIXBUILD_SSH_USER}
+  PubkeyAcceptedKeyTypes ssh-ed25519
+  ServerAliveInterval 60
+  IPQoS throughput
+  IdentityFile {ssh_key_path}
+"""
+        
+        if not os.path.exists(ssh_config) or NIXBUILD_HOST not in open(ssh_config).read():
+            with open(ssh_config, 'a') as f:
+                f.write(nixbuild_config)
+            os.chmod(ssh_config, 0o600)
+            logger.info(f"[NIXBUILD] Added SSH config for {NIXBUILD_HOST}")
+        
+        # Configure build machines
+        machines_entry = f"ssh://{NIXBUILD_SSH_USER}@{NIXBUILD_HOST} x86_64-linux - {NIXBUILD_MAX_JOBS} 1 {NIXBUILD_FEATURES} - -\n"
+        
+        if os.path.exists(NIX_MACHINES_FILE):
+            with open(NIX_MACHINES_FILE, 'r') as f:
+                content = f.read()
+            if NIXBUILD_HOST not in content:
+                with open(NIX_MACHINES_FILE, 'a') as f:
+                    f.write(machines_entry)
+                logger.info(f"[NIXBUILD] Added {NIXBUILD_HOST} to {NIX_MACHINES_FILE}")
+            else:
+                logger.info(f"[NIXBUILD] {NIXBUILD_HOST} already in {NIX_MACHINES_FILE}")
+        else:
+            with open(NIX_MACHINES_FILE, 'w') as f:
+                f.write(machines_entry)
+            logger.info(f"[NIXBUILD] Created {NIX_MACHINES_FILE} with {NIXBUILD_HOST}")
+        os.chmod(NIX_MACHINES_FILE, 0o644)
+        
+        logger.info(f"[NIXBUILD] ✓ Configuration complete")
+        return True, f"{NIXBUILD_HOST} configured with existing key for user '{NIXBUILD_SSH_USER}'"
+        
+    except Exception as e:
+        logger.error(f"[NIXBUILD] ✗ Setup failed: {e}")
+        return False, f"Setup failed: {str(e)}"
 
 
 def setup_port_forward(host_port: int, container_ip: str, container_port: int) -> bool:
     """Setup iptables DNAT rule."""
+    logger.info(f"[PORT-FWD] Setting up port forward: host:{host_port} -> {container_ip}:{container_port}")
+    
     # Remove ALL existing rules for this port (cleanup duplicates)
+    cleanup_count = 0
     while True:
-        stdout, _, _ = run_cmd(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "--line-numbers"])
+        stdout, _, _ = run_cmd(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "--line-numbers"], 
+                               description=f"list-rules-port-{host_port}")
         found = False
         if f"dpt:{host_port}" in stdout:
             lines = stdout.strip().split('\n')
             for i, line in enumerate(lines):
                 if f"dpt:{host_port}" in line:
                     # Delete by line number (1-indexed in iptables)
-                    run_cmd(["iptables", "-t", "nat", "-D", "PREROUTING", str(i)], timeout=10)
+                    run_cmd(["iptables", "-t", "nat", "-D", "PREROUTING", str(i)], 
+                           timeout=10, description=f"del-rule-port-{host_port}-line-{i}")
                     found = True
+                    cleanup_count += 1
                     break
         if not found:
             break
+    
+    if cleanup_count > 0:
+        logger.info(f"[PORT-FWD] Cleaned up {cleanup_count} existing rules for port {host_port}")
     
     # Add DNAT rule
     _, _, rc = run_cmd([
         "iptables", "-t", "nat", "-A", "PREROUTING",
         "-p", "tcp", "--dport", str(host_port),
         "-j", "DNAT", "--to-destination", f"{container_ip}:{container_port}"
-    ], timeout=10)
+    ], timeout=10, description=f"add-rule-port-{host_port}")
+    
+    if rc == 0:
+        logger.info(f"[PORT-FWD] ✓ Port forward created: {host_port} -> {container_ip}:{container_port}")
+    else:
+        logger.error(f"[PORT-FWD] ✗ Failed to create port forward for port {host_port}")
+    
     return rc == 0
 
 
 def remove_port_forward(host_port: int, container_ip: str, container_port: int) -> bool:
     """Remove iptables DNAT rule."""
+    logger.info(f"[PORT-FWD] Removing port forward: host:{host_port} -> {container_ip}:{container_port}")
     run_cmd([
         "iptables", "-t", "nat", "-D", "PREROUTING",
         "-p", "tcp", "--dport", str(host_port),
         "-j", "DNAT", "--to-destination", f"{container_ip}:{container_port}"
-    ], timeout=10)
+    ], timeout=10, description=f"remove-rule-port-{host_port}")
+    logger.info(f"[PORT-FWD] Port forward removed (if it existed)")
     return True
 
 
 def find_next_available_ip() -> Optional[str]:
     """Find next available IP in container subnet."""
     import ipaddress
-    subnet = ipaddress.ip_network("10.100.0.0/16")
+    logger.debug(f"[IP-ALLOC] Searching for available IP in {CONTAINER_SUBNET}...")
+    
+    subnet = ipaddress.ip_network(CONTAINER_SUBNET)
+    host_ip = ipaddress.ip_address(CONTAINER_HOST_IP)
     used_ips = set()
     
-    for name in get_all_containers():
+    containers = get_all_containers()
+    logger.debug(f"[IP-ALLOC] Checking {len(containers)} existing containers...")
+    
+    for name in containers:
         ip = get_container_ip(name)
         if ip:
             try:
                 used_ips.add(ipaddress.ip_address(ip))
+                logger.debug(f"[IP-ALLOC]   - {name}: {ip} (in use)")
             except ValueError:
                 pass
     
+    logger.debug(f"[IP-ALLOC] {len(used_ips)} IPs are currently in use")
+    
     for host in range(2, 255):
         candidate = ipaddress.ip_address(subnet.network_address + host)
-        if candidate not in used_ips and candidate != ipaddress.ip_address("10.100.0.1"):
+        if candidate not in used_ips and candidate != host_ip:
+            logger.info(f"[IP-ALLOC] ✓ Found available IP: {candidate}")
             return str(candidate)
+    
+    logger.error(f"[IP-ALLOC] ✗ No available IPs in {CONTAINER_SUBNET}")
     return None
 
 
@@ -232,6 +419,26 @@ def generate_html_page(title: str, body_content: str) -> str:
 </html>'''
 
 
+def build_container_config(name: str, nix_config: str) -> str:
+    """Write NixOS container config to a temp file and return the path."""
+    import tempfile
+    config_content = f'''
+{{ config, pkgs, lib, ... }}:
+
+{nix_config}
+'''
+    fd, config_file = tempfile.mkstemp(prefix=f"ncp_{name}_", suffix=".nix")
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(config_content)
+        logger.debug(f"[CONFIG] Written container config to {config_file}")
+        return config_file
+    except Exception as e:
+        os.close(fd)
+        os.unlink(config_file)
+        raise e
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root_page(request: Request):
     """Serve HTML frontend - containers loaded dynamically via JS."""
@@ -270,6 +477,9 @@ async def root_page(request: Request):
 @app.get("/api/v1/containers")
 async def list_containers(user: Optional[str] = Depends(optional_user)):
     """List all containers (public view shows unowned only)."""
+    user_str = user or "anonymous"
+    logger.info(f"[LIST] User '{user_str}' listing containers")
+    
     all_names = get_all_containers()
     result = []
     
@@ -293,6 +503,7 @@ async def list_containers(user: Optional[str] = Depends(optional_user)):
             project=info.get("project")
         ))
     
+    logger.info(f"[LIST] Returning {len(result)} containers for '{user_str}'")
     return result
 
 
@@ -303,41 +514,58 @@ async def create_container(
 ):
     """Create a new container."""
     full_name = req.name[:12]
+    logger.info(f"[CREATE] User '{user}' creating container '{full_name}' (requested: '{req.name}')")
+    logger.info(f"[CREATE] Config: port={req.port}, container_port={req.container_port}")
     
     if len(full_name) < 3:
+        logger.warning(f"[CREATE] Name too short: '{full_name}'")
         raise HTTPException(400, "Name too short after truncation")
     
-    if full_name in get_all_containers():
+    existing = get_all_containers()
+    if full_name in existing:
+        logger.warning(f"[CREATE] Container '{full_name}' already exists")
         raise HTTPException(409, f"Container '{full_name}' already exists")
     
     # Allocate IP
+    logger.info(f"[CREATE] Allocating IP for '{full_name}'...")
     ip = find_next_available_ip()
     if not ip:
+        logger.error(f"[CREATE] No available IPs for '{full_name}'")
         raise HTTPException(500, "No available IPs")
+    logger.info(f"[CREATE] Allocated IP {ip} for '{full_name}'")
     
     # Build config
     nix_config = req.config or '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
     config_file = build_container_config(full_name, nix_config)
+    logger.info(f"[CREATE] Created temp config file: {config_file}")
     
     try:
         # Create container
+        logger.info(f"[CREATE] Running nixos-container create for '{full_name}'...")
         stdout, stderr, rc = run_cmd([
             "nixos-container", "create", full_name,
             "--config-file", config_file,
-            "--host-address", "10.100.0.1",
+            "--host-address", CONTAINER_HOST_IP,
             "--local-address", ip
-        ], timeout=600)
+        ], timeout=600, description=f"create-container-{full_name}")
         
         if rc != 0:
+            logger.error(f"[CREATE] Container creation failed: {stderr}")
             raise HTTPException(500, f"Creation failed: {stderr}")
+        logger.info(f"[CREATE] ✓ Container '{full_name}' created successfully")
     finally:
         os.unlink(config_file)
+        logger.debug(f"[CREATE] Cleaned up temp config file")
     
     # Start and setup port forward
-    run_cmd(["nixos-container", "start", full_name], timeout=60)
+    logger.info(f"[CREATE] Starting container '{full_name}'...")
+    run_cmd(["nixos-container", "start", full_name], timeout=60, description=f"start-{full_name}")
+    
+    logger.info(f"[CREATE] Setting up port forward for '{full_name}'...")
     setup_port_forward(req.port, ip, req.container_port)
     
     # Save to DB
+    logger.info(f"[CREATE] Saving '{full_name}' to database...")
     db.containers_db[full_name] = {
         "ip": ip,
         "host_port": req.port,
@@ -349,6 +577,7 @@ async def create_container(
         "public": req.public
     }
     save_db(CONTAINERS_DB_FILE, db.containers_db)
+    logger.info(f"[CREATE] ✓ Container '{full_name}' fully deployed and saved")
     
     return ContainerInfo(
         name=full_name,
@@ -364,28 +593,37 @@ async def create_container(
 async def destroy_container(req: ContainerDestroyRequest, user: str = Depends(require_user)):
     """Destroy a container (owner or admin only)."""
     full_name = req.name[:12]
+    logger.info(f"[DESTROY] User '{user}' destroying container '{full_name}'")
+    
     info = db.containers_db.get(full_name)
     
     if not info:
+        logger.warning(f"[DESTROY] Container '{full_name}' not found in database")
         raise HTTPException(404, "Container not found")
     
     if info.get("owner") != user and not db.users_db.get(user, {}).get("is_admin"):
+        logger.warning(f"[DESTROY] User '{user}' not authorized to destroy '{full_name}' (owner: {info.get('owner')})")
         raise HTTPException(403, "Not owner of this container")
     
     # Cleanup port forward
     if info.get("host_port") and info.get("ip"):
+        logger.info(f"[DESTROY] Removing port forward for '{full_name}'...")
         remove_port_forward(info["host_port"], info["ip"], info.get("container_port", 80))
     
     # Destroy container
-    _, stderr, rc = run_cmd(["nixos-container", "destroy", full_name], timeout=60)
+    logger.info(f"[DESTROY] Running nixos-container destroy '{full_name}'...")
+    _, stderr, rc = run_cmd(["nixos-container", "destroy", full_name], timeout=60, description=f"destroy-{full_name}")
     if rc != 0 and "No such file or directory" not in stderr:
+        logger.error(f"[DESTROY] Failed to destroy '{full_name}': {stderr}")
         raise HTTPException(500, f"Destroy failed: {stderr}")
     
     # Remove from DB
     if full_name in db.containers_db:
         del db.containers_db[full_name]
         save_db(CONTAINERS_DB_FILE, db.containers_db)
+        logger.info(f"[DESTROY] ✓ Container '{full_name}' removed from database")
     
+    logger.info(f"[DESTROY] ✓ Container '{full_name}' destroyed successfully")
     return {"success": True, "message": f"Container '{full_name}' destroyed"}
 
 
@@ -396,92 +634,190 @@ async def deploy_project(
     user: str = Depends(require_user)
 ):
     """Deploy a project - writes files and uses nixos-container --flake."""
+    logger.info("=" * 60)
+    logger.info(f"[DEPLOY] Project '{project_name}' deployment started by user '{user}'")
+    logger.info(f"[DEPLOY] Files received: {list(request.files.keys())}")
     
     if not re.match(r'^[a-zA-Z0-9_-]+$', project_name):
+        logger.error(f"[DEPLOY] Invalid project name: '{project_name}'")
         raise HTTPException(400, "Invalid project name")
     
     if "flake.nix" not in request.files:
+        logger.error(f"[DEPLOY] No flake.nix found in project files")
         raise HTTPException(400, "No flake.nix in project files")
     
     # Create temp directory
     temp_dir = tempfile.mkdtemp(prefix=f"ncp_project_{project_name}_")
+    logger.info(f"[DEPLOY] Created temp directory: {temp_dir}")
     deployed, destroyed, errors = [], [], []
     
     try:
         # Write all files
+        logger.info(f"[DEPLOY] Writing {len(request.files)} files to temp directory...")
         for filepath, content in request.files.items():
             full_path = os.path.join(temp_dir, filepath)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, 'w') as f:
                 f.write(content)
+            logger.debug(f"[DEPLOY]   ✓ Written: {filepath} ({len(content)} bytes)")
+        logger.info(f"[DEPLOY] ✓ All files written to {temp_dir}")
         
         # Get ncp.containers from flake (simple eval for ports only)
         port_cmd = f'''
 let flake = builtins.getFlake (toString {temp_dir}); 
 in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
 '''
-        stdout, stderr, rc = run_cmd(["nix", "eval", "--impure", "--json", "--expr", port_cmd], timeout=60)
+        logger.info(f"[DEPLOY] Evaluating flake.nix to get container configurations...")
+        stdout, stderr, rc = run_cmd(["nix", "eval", "--impure", "--json", "--expr", port_cmd], 
+                                     timeout=60, description="eval-flake")
         
         if rc != 0:
+            logger.error(f"[DEPLOY] Flake evaluation failed: {stderr}")
             raise HTTPException(400, f"Failed to evaluate flake.nix: {stderr}")
         
         try:
             ports = json.loads(stdout)
+            logger.info(f"[DEPLOY] ✓ Flake evaluated successfully")
         except:
+            logger.error(f"[DEPLOY] Failed to parse flake evaluation output")
             raise HTTPException(400, "No ncp.containers defined in flake.nix")
         
         if not ports:
+            logger.error(f"[DEPLOY] No ncp.containers defined in flake.nix")
             raise HTTPException(400, "No ncp.containers defined in flake.nix")
+        
+        logger.info(f"[DEPLOY] Desired containers from flake: {list(ports.keys())}")
+        logger.info(f"[DEPLOY] Port mappings: {ports}")
         
         # Get current containers for this project
         existing = get_all_containers()
         current = {n: i for n, i in db.containers_db.items() 
                    if i.get('owner') == user and i.get('project') == project_name and n in existing}
         
+        logger.info(f"[DEPLOY] Current containers for project '{project_name}': {list(current.keys())}")
+        
         desired = set(ports.keys())
         current_names = set(current.keys())
         
         # Destroy obsolete
-        for name in current_names - desired:
-            full_name = name[:12]
-            info = db.containers_db.get(full_name, {})
-            if info.get('host_port') and info.get('ip'):
-                remove_port_forward(info['host_port'], info['ip'], info.get('container_port', 80))
-            run_cmd(["nixos-container", "destroy", full_name], timeout=60)
-            if full_name in db.containers_db:
-                del db.containers_db[full_name]
-                save_db(CONTAINERS_DB_FILE, db.containers_db)
-            destroyed.append(full_name)
+        to_destroy = current_names - desired
+        if to_destroy:
+            logger.info(f"[DEPLOY] Destroying {len(to_destroy)} obsolete containers: {list(to_destroy)}")
+            for name in to_destroy:
+                full_name = name[:12]
+                info = db.containers_db.get(full_name, {})
+                if info.get('host_port') and info.get('ip'):
+                    logger.info(f"[DEPLOY]   Removing port forward for '{full_name}'...")
+                    remove_port_forward(info['host_port'], info['ip'], info.get('container_port', 80))
+                logger.info(f"[DEPLOY]   Destroying container '{full_name}'...")
+                run_cmd(["nixos-container", "destroy", full_name], timeout=60, description=f"destroy-{full_name}")
+                if full_name in db.containers_db:
+                    del db.containers_db[full_name]
+                    save_db(CONTAINERS_DB_FILE, db.containers_db)
+                destroyed.append(full_name)
+                logger.info(f"[DEPLOY]   ✓ Destroyed '{full_name}'")
+        else:
+            logger.info(f"[DEPLOY] No obsolete containers to destroy")
         
-        # Create new containers using --flake
-        for name in desired - current_names:
+        # Create new containers using parallel builds
+        new_containers = list(desired - current_names)
+        output_paths = {}
+        
+        if new_containers:
+            logger.info(f"[DEPLOY] Building {len(new_containers)} new containers: {new_containers}")
+            # Build all outputs at once: nix build .#nixosConfigurations.container1.config.system.build.toplevel ...
+            build_targets = [f"{temp_dir}#nixosConfigurations.{name}.config.system.build.toplevel" for name in new_containers]
+            logger.info(f"[DEPLOY] Build targets: {build_targets}")
+            
+            logger.info(f"[DEPLOY] Starting parallel nix build (timeout=600s)...")
+            stdout, stderr, rc = run_cmd(
+                ["nix", "build", "--no-link", "--json"] + build_targets,
+                timeout=600, description="nix-build-all"
+            )
+            
+            if rc != 0:
+                logger.error(f"[DEPLOY] Build failed: {stderr}")
+                raise HTTPException(500, f"Parallel build failed: {stderr}")
+            
+            logger.info(f"[DEPLOY] ✓ Build completed successfully")
+            
+            # Parse build results to get output paths
+            try:
+                build_results = json.loads(stdout)
+                # nix build --json returns array of {drvPath, outputs: {out: path}}
+                for i, result in enumerate(build_results):
+                    name = new_containers[i]
+                    out_path = result.get("outputs", {}).get("out")
+                    if out_path:
+                        output_paths[name] = out_path
+                        logger.info(f"[DEPLOY]   Built: {name} -> {out_path}")
+            except Exception as e:
+                logger.error(f"[DEPLOY] Failed to parse build results: {e}")
+                errors.append(f"Failed to parse build results: {e}")
+        else:
+            logger.info(f"[DEPLOY] No new containers to build")
+        
+        # Create containers from pre-built system paths
+        if new_containers:
+            logger.info(f"[DEPLOY] Creating {len(new_containers)} containers from pre-built paths...")
+        
+        for name in new_containers:
             full_name = name[:12]
             host_port = ports.get(name)
+            system_path = output_paths.get(name)
+            
+            logger.info(f"[DEPLOY] Creating container '{full_name}' (port {host_port})...")
             
             if not host_port:
+                logger.error(f"[DEPLOY]   No port specified for '{full_name}'")
                 errors.append(f"{full_name}: no port specified")
                 continue
             
-            ip = find_next_available_ip()
-            if not ip:
-                errors.append(f"{full_name}: no available IPs")
+            if not system_path:
+                logger.error(f"[DEPLOY]   No system path for '{full_name}' - build may have failed")
+                errors.append(f"{full_name}: build did not produce output")
                 continue
             
-            # Create using --flake
+            logger.info(f"[DEPLOY]   Allocating IP for '{full_name}'...")
+            ip = find_next_available_ip()
+            if not ip:
+                logger.error(f"[DEPLOY]   No available IPs for '{full_name}'")
+                errors.append(f"{full_name}: no available IPs")
+                continue
+            logger.info(f"[DEPLOY]   Allocated IP: {ip}")
+            
+            # Create using pre-built system path (fast - no building)
+            logger.info(f"[DEPLOY]   Creating container '{full_name}' from {system_path}...")
             stdout, stderr, rc = run_cmd([
                 "nixos-container", "create", full_name,
-                "--flake", f"{temp_dir}#{name}",
-                "--host-address", "10.100.0.1",
+                "--system-path", system_path,
+                "--host-address", CONTAINER_HOST_IP,
                 "--local-address", ip
-            ], timeout=600)
+            ], timeout=60, description=f"create-{full_name}")  # Much shorter timeout - just copying
+            
+            # If container already exists, destroy and retry
+            if rc != 0 and "already exists" in stderr:
+                logger.warning(f"[DEPLOY]   Container '{full_name}' already exists, destroying and retrying...")
+                run_cmd(["nixos-container", "destroy", full_name], timeout=30, description=f"destroy-retry-{full_name}")
+                stdout, stderr, rc = run_cmd([
+                    "nixos-container", "create", full_name,
+                    "--system-path", system_path,
+                    "--host-address", CONTAINER_HOST_IP,
+                    "--local-address", ip
+                ], timeout=60, description=f"create-retry-{full_name}")
             
             if rc != 0:
+                logger.error(f"[DEPLOY]   Failed to create '{full_name}': {stderr}")
                 errors.append(f"{full_name}: creation failed - {stderr}")
                 continue
             
-            run_cmd(["nixos-container", "start", full_name], timeout=60)
+            logger.info(f"[DEPLOY]   Starting container '{full_name}'...")
+            run_cmd(["nixos-container", "start", full_name], timeout=60, description=f"start-{full_name}")
+            
+            logger.info(f"[DEPLOY]   Setting up port forward {host_port} -> {ip}:80...")
             setup_port_forward(host_port, ip, 80)  # Assume port 80 inside
             
+            logger.info(f"[DEPLOY]   Saving '{full_name}' to database...")
             db.containers_db[full_name] = {
                 "ip": ip,
                 "host_port": host_port,
@@ -489,7 +825,8 @@ in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
                 "status": "up",
                 "owner": user,
                 "project": project_name,
-                "created_at": datetime.now().isoformat()
+                "created_at": datetime.now().isoformat(),
+                "system_path": system_path  # Track the built path
             }
             save_db(CONTAINERS_DB_FILE, db.containers_db)
             
@@ -499,22 +836,28 @@ in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
                 created_at=db.containers_db[full_name]["created_at"],
                 owner=user
             ))
+            logger.info(f"[DEPLOY]   ✓ Container '{full_name}' deployed successfully")
     
     finally:
+        logger.info(f"[DEPLOY] Cleaning up temp directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
     
     msgs = []
     if deployed:
-        msgs.append(f"Created {len(deployed)} containers")
+        msgs.append(f"Created {len(deployed)} containers: {[c.name for c in deployed]}")
     if destroyed:
-        msgs.append(f"Removed {len(destroyed)} obsolete containers")
+        msgs.append(f"Removed {len(destroyed)} obsolete containers: {destroyed}")
     if errors:
         msgs.append(f"{len(errors)} errors: {'; '.join(errors[:3])}")
+    
+    message = ", ".join(msgs) if msgs else "No changes"
+    logger.info(f"[DEPLOY] Deployment complete: {message}")
+    logger.info("=" * 60)
     
     return ProjectDeployResponse(
         project=project_name,
         containers=deployed,
-        message=", ".join(msgs) if msgs else "No changes"
+        message=message
     )
 
 
@@ -522,7 +865,10 @@ in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
 @app.post("/api/v1/auth/register")
 async def register(user: UserRegister):
     """Register a new user."""
+    logger.info(f"[AUTH] Registration attempt for username: '{user.username}'")
+    
     if user.username in db.users_db:
+        logger.warning(f"[AUTH] Registration failed: username '{user.username}' already exists")
         raise HTTPException(400, "Username already exists")
     
     db.users_db[user.username] = {
@@ -533,18 +879,24 @@ async def register(user: UserRegister):
         "is_admin": False
     }
     save_db(USERS_DB_FILE, db.users_db)
+    logger.info(f"[AUTH] ✓ User '{user.username}' registered successfully")
     
     token = create_access_token({"sub": user.username})
+    logger.info(f"[AUTH] Token created for '{user.username}'")
     return TokenResponse(access_token=token)
 
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
 async def login(creds: UserLogin):
     """Login and get access token."""
+    logger.info(f"[AUTH] Login attempt for username: '{creds.username}'")
+    
     user = db.users_db.get(creds.username)
     if not user or not verify_password(creds.password, user["password_hash"]):
+        logger.warning(f"[AUTH] Login failed for '{creds.username}': invalid credentials")
         raise HTTPException(401, "Invalid credentials")
     
+    logger.info(f"[AUTH] ✓ User '{creds.username}' logged in successfully")
     token = create_access_token({"sub": creds.username})
     return TokenResponse(access_token=token)
 
@@ -553,9 +905,50 @@ async def login(creds: UserLogin):
 async def me(user: str = Depends(require_user)):
     """Get current user info."""
     info = db.users_db.get(user, {})
+    logger.debug(f"[AUTH] User info request for '{user}' (admin={info.get('is_admin', False)})")
     return {"username": user, "is_admin": info.get("is_admin", False)}
 
 
+# Admin endpoints
+@app.post("/api/v1/admin/setup-nixbuild")
+async def setup_nixbuild(user: str = Depends(require_user)):
+    """Setup nixbuild.net remote builder (admin only)."""
+    logger.info(f"[ADMIN] nixbuild.net setup requested by user '{user}'")
+    
+    if not db.users_db.get(user, {}).get("is_admin"):
+        logger.warning(f"[ADMIN] User '{user}' is not an admin - setup denied")
+        raise HTTPException(403, "Admin required")
+    
+    logger.info(f"[ADMIN] Running nixbuild.net setup...")
+    success, message = setup_nixbuild_net()
+    
+    if success:
+        logger.info(f"[ADMIN] ✓ nixbuild.net setup: {message}")
+    else:
+        logger.error(f"[ADMIN] ✗ nixbuild.net setup failed: {message}")
+    
+    return {"success": success, "message": message}
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Log startup information."""
+    logger.info("=" * 60)
+    logger.info("🚀 NCP API Server Starting")
+    logger.info("=" * 60)
+    logger.info(f"[STARTUP] Host: {API_HOST}, Port: {API_PORT}")
+    logger.info(f"[STARTUP] Container Subnet: {CONTAINER_SUBNET}, Host IP: {CONTAINER_HOST_IP}")
+    logger.info(f"[STARTUP] Data Directory: {db.DATA_DIR}")
+    logger.info(f"[STARTUP] Nixbuild Host: {NIXBUILD_HOST}")
+    
+    container_count = len(db.containers_db)
+    user_count = len(db.users_db)
+    logger.info(f"[STARTUP] Loaded {container_count} containers, {user_count} users from database")
+    logger.info("=" * 60)
+
+
 if __name__ == "__main__":
+    logger.info("[STARTUP] Initializing default admin...")
     init_default_admin()
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.info(f"[STARTUP] Starting uvicorn server on {API_HOST}:{API_PORT}")
+    uvicorn.run(app, host=API_HOST, port=API_PORT)

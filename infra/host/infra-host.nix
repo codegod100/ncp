@@ -67,7 +67,7 @@ in {
     
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkgs.python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic pyjwt ])}/bin/python3 /home/nixos/code/ncp/infra/api/main.py";
+      ExecStart = "${pkgs.python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic pyjwt python-dotenv ])}/bin/python3 /home/nixos/code/ncp/infra/api/main.py";
       Restart = "always";
       RestartSec = 5;
       User = "root";
@@ -165,7 +165,7 @@ in {
 
   environment.systemPackages = with pkgs; [
     nixos-container systemd iproute2 iptables bridge-utils tcpdump curl jq htop vim git socat
-    (python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic requests pyjwt ]))
+    (python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic requests pyjwt python-dotenv ]))
   ];
 
   environment.etc."ncp-tools.sh".source = pkgs.writeShellScript "ncp-tools" ''

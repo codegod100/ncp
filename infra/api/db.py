@@ -4,7 +4,8 @@ import json
 import os
 from typing import Dict, Any
 
-DATA_DIR = "/var/lib/ncp"
+# Allow overriding data directory via environment variable
+DATA_DIR = os.getenv("NCP_DATA_DIR", "/var/lib/ncp")
 CONTAINERS_DB_FILE = os.path.join(DATA_DIR, "containers.json")
 USERS_DB_FILE = os.path.join(DATA_DIR, "users.json")
 

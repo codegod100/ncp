@@ -10,6 +10,7 @@ pkgs.python3Packages.buildPythonApplication {
     fastapi
     uvicorn
     pydantic
+    python-dotenv
   ];
   
   doCheck = false;
