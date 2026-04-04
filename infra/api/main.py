@@ -26,7 +26,6 @@ from auth import (
     init_default_admin, hash_password, verify_password, create_access_token,
     require_user, optional_user
 )
-)
 
 app = FastAPI(title="NCP API", version="1.0.0")
 
