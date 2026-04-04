@@ -1036,7 +1036,7 @@ def parse_flake_containers(flake_content: str) -> Dict[str, Any]:
             
             # For now, we use a default config
             # In production, we'd extract the full config = { ... } function
-            spec['config'] = '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
+            spec['config'] = '{ services.nginx.enable = true; services.nginx.virtualHosts.default.listen = [{ addr = "0.0.0.0"; port = 80; }]; services.nginx.virtualHosts.default.locations."/".return = "200 \"Hello from NCP\";"; networking.firewall.allowedTCPPorts = [ 80 ]; }'
             
             containers[container_name] = spec
             
@@ -1072,7 +1072,7 @@ def parse_flake_containers(flake_content: str) -> Dict[str, Any]:
         
         # For now, we can't easily extract the full config function
         # In production, this would use nix eval
-        spec['config'] = '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
+        spec['config'] = '{ services.nginx.enable = true; services.nginx.virtualHosts.default.listen = [{ addr = "0.0.0.0"; port = 80; }]; services.nginx.virtualHosts.default.locations."/".return = "200 \"Hello from NCP\";"; networking.firewall.allowedTCPPorts = [ 80 ]; }'
         
         containers[name] = spec
     
