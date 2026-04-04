@@ -67,7 +67,7 @@ in {
     
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkgs.python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic ])}/bin/python3 /home/nixos/code/ncp/infra/api/main.py";
+      ExecStart = "${pkgs.python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic pyjwt ])}/bin/python3 /home/nixos/code/ncp/infra/api/main.py";
       Restart = "always";
       RestartSec = 5;
       User = "root";
