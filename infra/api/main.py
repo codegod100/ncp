@@ -229,12 +229,24 @@ def get_all_containers():
     return []
 
 def find_next_available_ip() -> Optional[str]:
+    """Find next available IP in the container network.
+    
+    Checks both database records AND actually running containers
+    to avoid IP conflicts with containers created outside ncp.
+    """
     used_ips = set()
-    containers = get_all_containers()
-    for name in containers:
-        info = containers_db.get(name, {})
+    
+    # Get IPs from database
+    for name, info in containers_db.items():
         if info.get("ip"):
             used_ips.add(info["ip"])
+    
+    # Get IPs from actually running containers (includes non-ncp containers)
+    containers = get_all_containers()
+    for name in containers:
+        stdout, stderr, rc = run_cmd(["nixos-container", "show-ip", name], timeout=5)
+        if rc == 0 and stdout.strip():
+            used_ips.add(stdout.strip())
     
     for third in range(1, 255):
         for fourth in range(1, 255):
