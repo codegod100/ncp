@@ -198,13 +198,20 @@ def create_container_imperative(name: str, system_path: str, ip: str) -> bool:
     stdout, stderr, rc = run_cmd([
         "nixos-container", "create", name,
         "--system-path", system_path,
-        "--auto-start",
         "--host-address", NETWORK_CONFIG["gateway"],
         "--local-address", ip
     ])
     
     if rc != 0:
         raise Exception(f"Container creation failed: {stderr}")
+    
+    # Start the container explicitly (don't rely on --auto-start)
+    stdout, stderr, rc = run_cmd([
+        "nixos-container", "start", name
+    ], timeout=60)
+    
+    if rc != 0:
+        raise Exception(f"Container start failed: {stderr}")
     
     return True
 
