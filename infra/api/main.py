@@ -325,6 +325,7 @@ async def deploy_project(
         
         # Evaluate with Nix
         containers_def = parse_flake_containers_nix(temp_dir)
+        print(f"DEBUG deploy: containers_def = {containers_def}")
         if not containers_def:
             raise HTTPException(400, "No ncp.containers defined in flake.nix")
         
@@ -362,6 +363,8 @@ async def deploy_project(
             full_name = name[:12]
             spec = containers_def[name]
             host_port = spec.get('port')
+            
+            print(f"DEBUG: Creating {full_name}, spec={spec}, host_port={host_port}")
             
             if not host_port:
                 errors.append(f"{full_name}: no port specified")
