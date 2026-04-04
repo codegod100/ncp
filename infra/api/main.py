@@ -103,7 +103,7 @@ def generate_html_page(title: str, body_content: str) -> str:
 @app.get("/", response_class=HTMLResponse)
 async def root_page(request: Request):
     """Serve HTML frontend listing containers."""
-    user = await optional_user(request)
+    user = optional_user(request)
     
     # Get containers
     all_containers = get_all_containers()
