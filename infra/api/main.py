@@ -226,7 +226,6 @@ def find_next_available_ip() -> Optional[str]:
 
 def build_container_config(name: str, ip: str, user_config: str) -> str:
     """Build complete container Nix config from user snippet"""
-    # Clean up the config - remove automatic attributes that nixos-container sets
     cleaned_config = user_config.strip()
     
     # Remove boot.isContainer if present (nixos-container sets this)
@@ -236,8 +235,21 @@ def build_container_config(name: str, ip: str, user_config: str) -> str:
     # Remove networking.useDHCP if present
     cleaned_config = re.sub(r'\s*networking\.useDHCP\s*=\s*[^;]+;\s*', '\n', cleaned_config)
     
-    return f'''
-{{ config, lib, pkgs, ... }}:
+    # Check if user_config is already a complete Nix expression (starts with {)
+    if cleaned_config.startswith('{'):
+        # User provided full config - just add our required settings
+        return f'''{{ config, lib, pkgs, ... }}:
+
+{{
+  services.openssh.enable = true;
+  users.users.root.initialPassword = "root";
+{cleaned_config}
+  system.stateVersion = "24.11";
+}}
+'''
+    else:
+        # User provided just attribute contents
+        return f'''{{ config, lib, pkgs, ... }}:
 
 {{
   services.openssh.enable = true;
