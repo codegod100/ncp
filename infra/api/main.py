@@ -241,7 +241,6 @@ async def create_container(
         if rc != 0:
             raise HTTPException(500, f"Creation failed: {stderr}")
     finally:
-        import os
         os.unlink(config_file)
     
     # Start and setup port forward
@@ -392,7 +391,6 @@ async def deploy_project(
                     errors.append(f"{full_name}: creation failed - {stderr}")
                     continue
             finally:
-                import os
                 os.unlink(config_file)
             
             run_cmd(["nixos-container", "start", full_name], timeout=60)
