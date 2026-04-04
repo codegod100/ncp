@@ -359,15 +359,17 @@ async def root(user: Optional[str] = Depends(get_current_user)):
     
     auth_section = ""
     if user:
-        auth_section = f"<p>👤 Logged in as: <b>{user}</b> | <a href='/api/v1/auth/me'>Profile</a></p>"
+        auth_section = f'<p>👤 Logged in as: <b>{user}</b> | <button onclick="doLogout()" style="background:#666;padding:4px 12px;font-size:0.9em;">Logout</button></p>'
     else:
-        auth_section = """<p>🔒 <a href="#" onclick="document.getElementById('login-form').style.display='block';return false">Login</a> or 
-        <a href="#" onclick="document.getElementById('register-form').style.display='block';return false">Register</a></p>
+        auth_section = '''<p>🔒 <a href="#" onclick="showLogin();return false">Login</a> or 
+        <a href="#" onclick="showRegister();return false">Register</a></p>
         <div id="login-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;">
             <h4>Login</h4>
             <input type="text" id="login-user" placeholder="Username"><br>
             <input type="password" id="login-pass" placeholder="Password"><br>
             <button onclick="doLogin()">Login</button>
+            <button onclick="hideForms()" style="background:#666;">Cancel</button>
+            <div id="login-status" style="margin-top:10px;color:#d32f2f;"></div>
         </div>
         <div id="register-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;">
             <h4>Register</h4>
@@ -375,7 +377,9 @@ async def root(user: Optional[str] = Depends(get_current_user)):
             <input type="password" id="reg-pass" placeholder="Password"><br>
             <input type="email" id="reg-email" placeholder="Email (optional)"><br>
             <button onclick="doRegister()">Register</button>
-        </div>"""
+            <button onclick="hideForms()" style="background:#666;">Cancel</button>
+            <div id="reg-status" style="margin-top:10px;color:#d32f2f;"></div>
+        </div>'''
     
     html = f"""<!DOCTYPE html>
 <html>
@@ -447,9 +451,35 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
     </div>
     
     <script>
+        // Show/hide forms
+        function showLogin() {
+            document.getElementById('login-form').style.display = 'block';
+            document.getElementById('register-form').style.display = 'none';
+            document.getElementById('login-status').textContent = '';
+        }
+        function showRegister() {
+            document.getElementById('register-form').style.display = 'block';
+            document.getElementById('login-form').style.display = 'none';
+            document.getElementById('reg-status').textContent = '';
+        }
+        function hideForms() {
+            document.getElementById('login-form').style.display = 'none';
+            document.getElementById('register-form').style.display = 'none';
+        }
+        
         async function doLogin() {
             const username = document.getElementById('login-user').value;
             const password = document.getElementById('login-pass').value;
+            const statusEl = document.getElementById('login-status');
+            
+            if (!username || !password) {
+                statusEl.textContent = 'Please enter username and password';
+                return;
+            }
+            
+            statusEl.style.color = '#666';
+            statusEl.textContent = 'Logging in...';
+            
             try {
                 const res = await fetch('/api/v1/auth/login', {
                     method: 'POST',
@@ -459,13 +489,16 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
                 const data = await res.json();
                 if (res.ok) {
                     localStorage.setItem('ncp_token', data.access_token);
-                    alert('Login successful!');
-                    location.reload();
+                    statusEl.style.color = '#2e7d32';
+                    statusEl.textContent = 'Success! Reloading...';
+                    setTimeout(() => location.reload(), 500);
                 } else {
-                    alert('Error: ' + data.detail);
+                    statusEl.style.color = '#d32f2f';
+                    statusEl.textContent = data.detail || 'Login failed';
                 }
             } catch(e) {
-                alert('Error: ' + e.message);
+                statusEl.style.color = '#d32f2f';
+                statusEl.textContent = 'Network error: ' + e.message;
             }
         }
         
@@ -473,6 +506,16 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
             const username = document.getElementById('reg-user').value;
             const password = document.getElementById('reg-pass').value;
             const email = document.getElementById('reg-email').value || null;
+            const statusEl = document.getElementById('reg-status');
+            
+            if (!username || !password) {
+                statusEl.textContent = 'Please enter username and password';
+                return;
+            }
+            
+            statusEl.style.color = '#666';
+            statusEl.textContent = 'Registering...';
+            
             try {
                 const res = await fetch('/api/v1/auth/register', {
                     method: 'POST',
@@ -481,14 +524,27 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    alert('Registered! Please login.');
-                    document.getElementById('register-form').style.display='none';
+                    statusEl.style.color = '#2e7d32';
+                    statusEl.textContent = 'Registered! Switching to login...';
+                    setTimeout(() => {
+                        document.getElementById('login-user').value = username;
+                        document.getElementById('login-form').style.display = 'block';
+                        document.getElementById('register-form').style.display = 'none';
+                        statusEl.textContent = '';
+                    }, 1000);
                 } else {
-                    alert('Error: ' + data.detail);
+                    statusEl.style.color = '#d32f2f';
+                    statusEl.textContent = data.detail || 'Registration failed';
                 }
             } catch(e) {
-                alert('Error: ' + e.message);
+                statusEl.style.color = '#d32f2f';
+                statusEl.textContent = 'Network error: ' + e.message;
             }
+        }
+        
+        function doLogout() {
+            localStorage.removeItem('ncp_token');
+            location.reload();
         }
         
         // Add token to all API requests if logged in
@@ -497,12 +553,23 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
             const originalFetch = window.fetch;
             window.fetch = function() {
                 let args = Array.from(arguments);
-                if (args[0].startsWith('/api/') && args.length > 1) {
+                if (args[0].startsWith('/api/') && args.length > 1 && typeof args[1] === 'object') {
                     args[1].headers = args[1].headers || {};
                     args[1].headers['Authorization'] = 'Bearer ' + token;
                 }
                 return originalFetch.apply(this, args);
             };
+        }
+        
+        // Check if we're logged in and update UI
+        if (token) {
+            // Replace auth section with logout button
+            document.addEventListener('DOMContentLoaded', function() {
+                const authBox = document.querySelector('.auth-box');
+                if (authBox) {
+                    authBox.innerHTML = '<p>👤 Logged in | <button onclick="doLogout()" style="background:#666;padding:4px 12px;font-size:0.9em;">Logout</button></p>';
+                }
+            });
         }
     </script>
 </body>
