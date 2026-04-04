@@ -437,17 +437,10 @@ DELETE /api/v1/containers/{{name}} - Destroy</pre>
             try {
                 const res = await apiFetch('/api/v1/containers');
                 if (!res.ok) {
-                    if (res.status === 401) {
-                        // Not logged in - show public containers (call without auth)
-                        const publicRes = await fetch('/api/v1/containers');
-                        const data = await publicRes.json();
-                        renderContainers(data);
-                        return;
-                    }
-                    throw new Error('Failed to load');
+                    container.innerHTML = '<div class="empty"><p>Error loading containers: ' + res.status + '</p></div>';
+                    return;
                 }
                 const data = await res.json();
-                currentUser = 'user'; // Mark as logged in
                 renderContainers(data);
             } catch(e) {
                 container.innerHTML = '<div class="empty"><p>Error loading containers: ' + e.message + '</p></div>';
@@ -591,8 +584,8 @@ DELETE /api/v1/containers/{{name}} - Destroy</pre>
     return HTMLResponse(content=html)
 
 @app.get("/api/v1/containers", response_model=List[ContainerInfo])
-async def list_containers(user: str = Depends(require_user)):
-    """List containers accessible to the authenticated user"""
+async def list_containers(user: Optional[str] = Depends(get_current_user)):
+    """List containers - public sees unowned, authenticated sees their own + unowned"""
     names = get_all_containers()
     containers = []
     
@@ -600,17 +593,31 @@ async def list_containers(user: str = Depends(require_user)):
         info = containers_db.get(name, {})
         owner = info.get("owner")
         
-        # Show if: user is admin, user owns it, or unowned
-        if user == "admin" or owner == user or not owner:
-            status = get_container_status(name)
-            containers.append(ContainerInfo(
-                name=name,
-                status=status,
-                ip=info.get("ip"),
-                host_port=info.get("host_port"),
-                created_at=info.get("created_at", "unknown"),
-                owner=owner
-            ))
+        # Public: only unowned containers
+        # Authenticated: own containers + unowned containers (admin sees all)
+        if not user:
+            if not owner:  # Public only sees unowned
+                status = get_container_status(name)
+                containers.append(ContainerInfo(
+                    name=name,
+                    status=status,
+                    ip=info.get("ip"),
+                    host_port=info.get("host_port"),
+                    created_at=info.get("created_at", "unknown"),
+                    owner=None
+                ))
+        else:
+            # Authenticated: own, unowned, or admin sees all
+            if user == "admin" or owner == user or not owner:
+                status = get_container_status(name)
+                containers.append(ContainerInfo(
+                    name=name,
+                    status=status,
+                    ip=info.get("ip"),
+                    host_port=info.get("host_port"),
+                    created_at=info.get("created_at", "unknown"),
+                    owner=owner
+                ))
     
     return containers
 
