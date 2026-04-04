@@ -4,19 +4,15 @@ Example NixOS container configurations for the ncp (Nix Container Platform).
 
 ## Quick Start
 
-1. **Get your API token:**
+1. **Login with ncp CLI:**
 ```bash
-export TOKEN=$(curl -s -X POST https://nix.latha.org/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"youruser","password":"yourpass"}' \
-  | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+ncp login --server https://nix.latha.org
+# Enter your username and password
 ```
 
 2. **Deploy an example:**
 ```bash
-# Quick deploy both backend + frontend
-export TOKEN=your_token_here
-./deploy-pair.sh
+ncp deploy --name my-backend --port 9001 --config backend-api.nix
 ```
 
 ## Examples
@@ -29,16 +25,22 @@ A minimal example showing cross-container communication.
 
 **Deploy:**
 ```bash
-# Deploy backend first
-python3 deploy.py backend-api.nix my-backend 9001
+# Deploy backend
+ncp deploy --name my-backend --port 9001 --config backend-api.nix
 
-# Deploy frontend (edit backend-api.nix first to set the URL)
-python3 deploy.py frontend-app.nix my-frontend 9002
+# Edit frontend-app.nix to set your backend URL, then:
+ncp deploy --name my-frontend --port 9002 --config frontend-app.nix
 ```
 
 **Access:**
 - Backend: `http://YOUR_HOST:9001/` → JSON API with CORS
 - Frontend: `http://YOUR_HOST:9002/` → HTML with "Fetch from Backend" button
+
+**One-liner for both:**
+```bash
+export NCP_TOKEN=$(ncp token)  # or login first
+./deploy-pair.sh
+```
 
 ---
 
@@ -56,10 +58,9 @@ A more polished example with a styled todo interface.
 **Deploy:**
 ```bash
 # 1. Edit todo-frontend.nix: Set backendUrl to your backend IP:port
-
 # 2. Deploy both
-python3 deploy.py todo-api.nix todo-api 9003
-python3 deploy.py todo-frontend.nix todo-app 9004
+ncp deploy --name todo-api --port 9003 --config todo-api.nix
+ncp deploy --name todo-app --port 9004 --config todo-frontend.nix
 ```
 
 ---
@@ -132,37 +133,54 @@ Generic frontend that can fetch from any backend.
 | `networking.firewall` | All examples | Open port 80 |
 | CORS headers | `backend-api.nix` | Cross-origin requests |
 
-## Deployment Scripts
+## Deployment Methods
 
-### Option 1: Python helper (`deploy.py`)
+### Option 1: ncp CLI (Recommended)
 ```bash
-export NCP_TOKEN=your_token
-python3 deploy.py backend-api.nix my-api 9001
+# Login once
+ncp login --server https://nix.latha.org
+
+# Deploy
+ncp deploy --name my-container --port 9001 --config backend-api.nix
+
+# List your containers
+ncp list
+
+# Destroy
+ncp destroy my-container
 ```
 
 ### Option 2: Bash quick deploy (`deploy-pair.sh`)
 ```bash
-export TOKEN=your_token
-./deploy-pair.sh  # Deploys example-backend + example-frontend
+# Make sure you're logged in first
+ncp login --server https://nix.latha.org
+
+# Deploy both backend and frontend
+./deploy-pair.sh
 ```
 
 ### Option 3: Manual curl with JSON
 ```bash
-# Create payload first
-cat > payload.json << 'EOF'
-{
-  "name": "my-container",
-  "host_port": 9001,
-  "nix_config": "services.nginx.enable = true; ..."
-}
-EOF
+# Get token
+TOKEN=$(ncp token)
 
-# Deploy
+# Deploy via curl
 curl -X POST https://nix.latha.org/api/v1/containers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d @payload.json
+  -d @backend-api.json
 ```
+
+## ncp CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `ncp login --server URL` | Authenticate and save token |
+| `ncp token` | Show current auth token |
+| `ncp deploy --name X --port Y --config FILE.nix` | Deploy container |
+| `ncp list` | List your containers |
+| `ncp destroy NAME` | Remove container |
+| `ncp logs NAME` | View container logs |
 
 ## Troubleshooting
 
@@ -178,6 +196,11 @@ curl -X POST https://nix.latha.org/api/v1/containers \
 **Container won't start:**
 - Check config syntax: `nix-instantiate --eval myconfig.nix`
 - Check firewall port is open: `networking.firewall.allowedTCPPorts = [ 80 ];`
+- View logs: `ncp logs my-container`
+
+**ncp CLI not found:**
+- Install from repo: `cd /path/to/ncp && pip install -e cli/`
+- Or use nix develop: `nix develop --command ncp --help`
 
 ## More Examples Coming
 
