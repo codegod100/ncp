@@ -847,8 +847,14 @@ async def deploy_project(
         
         for container_name, container_spec in containers_def.items():
             try:
-                # Generate unique container name with project prefix
-                full_name = f"{project_name}-{container_name}"
+                # Container name: just use the service name (project is tracked separately)
+                # nixos-container has 12 char limit
+                full_name = container_name[:12]
+                
+                # Check if name is too short after truncation
+                if len(full_name) < 3:
+                    errors.append(f"{container_name}: name too short after truncation")
+                    continue
                 
                 # Check if container already exists
                 if full_name in get_all_containers():

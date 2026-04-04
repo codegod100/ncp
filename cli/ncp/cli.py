@@ -318,52 +318,6 @@ def deploy(ctx, project):
     except SystemExit:
         click.echo("❌ Deployment failed", err=True)
         sys.exit(1)
-        click.echo(f"   Or specify path: ncp deploy {service} -c /path/to/config.nix", err=True)
-        sys.exit(1)
-    
-    # Parse the config file
-    try:
-        parsed = parse_nix_config(config_path)
-    except Exception as e:
-        click.echo(f"❌ Failed to read {config_path}: {e}", err=True)
-        sys.exit(1)
-    
-    # Get port from metadata or error
-    host_port = parsed['host_port']
-    if not host_port:
-        click.echo(f"❌ No port specified in {config_path}", err=True)
-        click.echo(f"   Add this comment to your .nix file:", err=True)
-        click.echo(f"   # ncp: port=9001", err=True)
-        sys.exit(1)
-    
-    # Use name from metadata or service name
-    container_name = parsed['container_name'] or service
-    
-    spec = {
-        "name": container_name,
-        "description": f"Container {container_name} deployed via ncp CLI",
-        "nix_config": parsed['nix_config'],
-        "host_port": host_port,
-        "container_port": 80,
-        "auto_start": True
-    }
-    
-    click.echo(f"🚀 Deploying container '{container_name}'...")
-    click.echo(f"   Config: {config_path}")
-    click.echo(f"   Port mapping: {host_port} → 80 (container)")
-    click.echo(f"   ⏳ Building and starting (this may take a minute)...")
-    
-    try:
-        result = client.create_container(spec)
-        click.echo(f"✅ Container deployed and running!")
-        click.echo(f"   Status: {result['status']}")
-        click.echo(f"   IP: {result.get('ip') or 'auto-assigned'}")
-        click.echo(f"   Access: http://204.168.220.202:{host_port}")
-    except SystemExit:
-        click.echo("❌ Deployment failed", err=True)
-        sys.exit(1)
-
-
 @cli.command(name='deploy-demo')
 @click.option('--name', default='demo-web', help='Container name')
 @click.option('--port', default=8082, help='External port to expose')
