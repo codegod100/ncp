@@ -115,6 +115,11 @@ def find_next_available_ip() -> Optional[str]:
 
 def build_container_config(name: str, ip: str, custom_config: str) -> str:
     """Build container config string."""
+    # Strip outer braces from custom_config if present
+    custom_config = custom_config.strip()
+    if custom_config.startswith('{') and custom_config.endswith('}'):
+        custom_config = custom_config[1:-1].strip()
+    
     base = f'''{{ 
       boot.isContainer = true;
       networking.useDHCP = false;
