@@ -82,15 +82,19 @@ in {
     
     extraConfig = ''
       nix.latha.org {
-        # NCP API at /api/*
+        # NCP API at /api/* - API calls only
         handle_path /api/* {
           reverse_proxy localhost:8000
         }
         
-        # Info page at root
+        # Root path / - HTML frontend from API
+        handle / {
+          reverse_proxy localhost:8000
+        }
+        
+        # All other paths to API
         handle {
-          header Content-Type "text/html; charset=utf-8"
-          respond "<h1>NCP - Nix Container Platform</h1><p>API at <a href='/api/'>/api/</a></p>" 200
+          reverse_proxy localhost:8000
         }
       }
       
@@ -99,13 +103,14 @@ in {
       }
       
       :80 {
+        # NCP API at /api/*
         handle_path /api/* {
           reverse_proxy localhost:8000
         }
         
+        # All paths to API
         handle {
-          header Content-Type "text/html; charset=utf-8"
-          respond "<h1>NCP - Nix Container Platform</h1><p>API at <a href='/api/'>/api/</a></p>" 200
+          reverse_proxy localhost:8000
         }
       }
     '';
