@@ -1,38 +1,34 @@
-# NCP Flake Module
-# 
-# This module defines the ncp.containers option for use in flake-parts or standard flakes.
-
+# flake-module.nix - Exports ncp.containers as nixosConfigurations
 { lib, config, ... }:
-
 let
   cfg = config.ncp;
 in
 {
-  options.ncp = {
-    containers = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.submodule {
-        options = {
-          port = lib.mkOption {
-            type = lib.types.int;
-            description = "External host port for this container";
-          };
-          
-          containerPort = lib.mkOption {
-            type = lib.types.int;
-            default = 80;
-            description = "Internal container port";
-          };
-          
-          config = lib.mkOption {
-            type = lib.types.functionTo lib.types.attrs;
-            description = "NixOS configuration function: { config, pkgs, ... }: { ... }";
-          };
+  options.ncp.containers = lib.mkOption {
+    type = lib.types.attrsOf (lib.types.submodule {
+      options = {
+        port = lib.mkOption { type = lib.types.int; description = "External port"; };
+        containerPort = lib.mkOption { type = lib.types.int; default = 80; };
+        config = lib.mkOption { 
+          type = lib.types.functionTo lib.types.attrs;
+          description = "NixOS config: { config, pkgs, ... }: { ... }";
         };
-      });
-      default = {};
-      description = "NCP containers to deploy";
-    };
+      };
+    });
+    default = {};
   };
 
-  config = {};
+  config = lib.mkIf (cfg.containers != {}) {
+    nixosConfigurations = lib.mapAttrs (name: c:
+      lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [{
+          boot.isContainer = true;
+          networking.useDHCP = false;
+          networking.firewall.enable = true;
+          imports = [ (c.config { inherit config pkgs lib; modulesPath = <nixpkgs/nixos/modules>; }) ];
+        }];
+      }
+    ) cfg.containers;
+  };
 }

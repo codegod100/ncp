@@ -4,8 +4,10 @@ import re
 import os
 import tempfile
 import shutil
+import subprocess
+import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Tuple, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
@@ -24,10 +26,6 @@ from auth import (
     init_default_admin, hash_password, verify_password, create_access_token,
     require_user, optional_user
 )
-from nix import (
-    get_all_containers, get_container_status, find_next_available_ip,
-    setup_port_forward, remove_port_forward, build_container_config,
-    parse_flake_containers_nix, run_cmd
 )
 
 app = FastAPI(title="NCP API", version="1.0.0")
@@ -42,6 +40,87 @@ app.add_middleware(
 
 # Initialize on startup
 init_db()
+
+
+# Utility functions
+def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[str, str, int]:
+    """Run shell command and return stdout, stderr, returncode."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return result.stdout, result.stderr, result.returncode
+    except subprocess.TimeoutExpired:
+        return "", f"Command timed out after {timeout}s", -1
+    except Exception as e:
+        return "", str(e), -1
+
+
+def get_all_containers() -> List[str]:
+    """Get list of all nixos containers."""
+    stdout, _, _ = run_cmd(["nixos-container", "list"])
+    return [name.strip() for name in stdout.strip().split('\n') if name.strip()]
+
+
+def get_container_status(name: str) -> str:
+    """Get container status (up/down)."""
+    stdout, _, rc = run_cmd(["nixos-container", "status", name], timeout=10)
+    return "up" if rc == 0 and "up" in stdout else "down"
+
+
+def get_container_ip(name: str) -> Optional[str]:
+    """Get container IP."""
+    stdout, _, rc = run_cmd(["nixos-container", "show-ip", name], timeout=10)
+    return stdout.strip() if rc == 0 else None
+
+
+def setup_port_forward(host_port: int, container_ip: str, container_port: int) -> bool:
+    """Setup iptables DNAT rule."""
+    # Remove existing rule if present
+    stdout, _, _ = run_cmd(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "--line-numbers"])
+    if f"dpt:{host_port}" in stdout:
+        lines = stdout.strip().split('\n')
+        for i, line in enumerate(lines):
+            if f"dpt:{host_port}" in line:
+                run_cmd(["iptables", "-t", "nat", "-D", "PREROUTING", str(i)], timeout=10)
+                break
+    
+    # Add DNAT rule
+    _, _, rc = run_cmd([
+        "iptables", "-t", "nat", "-A", "PREROUTING",
+        "-p", "tcp", "--dport", str(host_port),
+        "-j", "DNAT", "--to-destination", f"{container_ip}:{container_port}"
+    ], timeout=10)
+    return rc == 0
+
+
+def remove_port_forward(host_port: int, container_ip: str, container_port: int) -> bool:
+    """Remove iptables DNAT rule."""
+    run_cmd([
+        "iptables", "-t", "nat", "-D", "PREROUTING",
+        "-p", "tcp", "--dport", str(host_port),
+        "-j", "DNAT", "--to-destination", f"{container_ip}:{container_port}"
+    ], timeout=10)
+    return True
+
+
+def find_next_available_ip() -> Optional[str]:
+    """Find next available IP in container subnet."""
+    import ipaddress
+    subnet = ipaddress.ip_network("10.100.0.0/16")
+    used_ips = set()
+    
+    for name in get_all_containers():
+        ip = get_container_ip(name)
+        if ip:
+            try:
+                used_ips.add(ipaddress.ip_address(ip))
+            except ValueError:
+                pass
+    
+    for host in range(2, 255):
+        candidate = ipaddress.ip_address(subnet.network_address + host)
+        if candidate not in used_ips and candidate != ipaddress.ip_address("10.100.0.1"):
+            return str(candidate)
+    return None
 
 
 # HTML Frontend
@@ -305,9 +384,8 @@ async def deploy_project(
     request: ProjectDeployRequest,
     user: str = Depends(require_user)
 ):
-    """Deploy a project idempotently using Nix evaluation."""
+    """Deploy a project - writes files and uses nixos-container --flake."""
     
-    # Validate
     if not re.match(r'^[a-zA-Z0-9_-]+$', project_name):
         raise HTTPException(400, "Invalid project name")
     
@@ -319,37 +397,41 @@ async def deploy_project(
     deployed, destroyed, errors = [], [], []
     
     try:
-        # Write files
+        # Write all files
         for filepath, content in request.files.items():
             full_path = os.path.join(temp_dir, filepath)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, 'w') as f:
                 f.write(content)
         
-        # Evaluate with Nix
-        containers_def = parse_flake_containers_nix(temp_dir)
-        if not containers_def:
+        # Get ncp.containers from flake (simple eval for ports only)
+        port_cmd = f'''
+let flake = builtins.getFlake (toString {temp_dir}); 
+in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
+'''
+        stdout, stderr, rc = run_cmd(["nix", "eval", "--impure", "--json", "--expr", port_cmd], timeout=60)
+        
+        if rc != 0:
+            raise HTTPException(400, f"Failed to evaluate flake.nix: {stderr}")
+        
+        try:
+            ports = json.loads(stdout)
+        except:
             raise HTTPException(400, "No ncp.containers defined in flake.nix")
         
-        # Get current state
-        existing = get_all_containers()
-        current = {
-            name: info for name, info in db.containers_db.items()
-            if info.get('owner') == user and info.get('project') == project_name and name in existing
-        }
+        if not ports:
+            raise HTTPException(400, "No ncp.containers defined in flake.nix")
         
-        desired_names = set(containers_def.keys())
+        # Get current containers for this project
+        existing = get_all_containers()
+        current = {n: i for n, i in db.containers_db.items() 
+                   if i.get('owner') == user and i.get('project') == project_name and n in existing}
+        
+        desired = set(ports.keys())
         current_names = set(current.keys())
         
-        # Cleanup stale entries
-        stale = {n for n, i in db.containers_db.items() if i.get('owner') == user and i.get('project') == project_name and n not in existing}
-        for name in stale:
-            del db.containers_db[name]
-        if stale:
-            save_db(CONTAINERS_DB_FILE, db.containers_db)
-        
         # Destroy obsolete
-        for name in current_names - desired_names:
+        for name in current_names - desired:
             full_name = name[:12]
             info = db.containers_db.get(full_name, {})
             if info.get('host_port') and info.get('ip'):
@@ -360,12 +442,10 @@ async def deploy_project(
                 save_db(CONTAINERS_DB_FILE, db.containers_db)
             destroyed.append(full_name)
         
-        # Create new
-        for name in desired_names - current_names:
+        # Create new containers using --flake
+        for name in desired - current_names:
             full_name = name[:12]
-            spec = containers_def[name]
-            host_port = spec.get('port')
-            
+            host_port = ports.get(name)
             
             if not host_port:
                 errors.append(f"{full_name}: no port specified")
@@ -376,35 +456,25 @@ async def deploy_project(
                 errors.append(f"{full_name}: no available IPs")
                 continue
             
-            nix_config = spec.get('config', '{ }')
-            config_file = build_container_config(full_name, nix_config)
+            # Create using --flake
+            stdout, stderr, rc = run_cmd([
+                "nixos-container", "create", full_name,
+                "--flake", f"{temp_dir}#{name}",
+                "--host-address", "10.100.0.1",
+                "--local-address", ip
+            ], timeout=600)
             
-            try:
-                stdout, stderr, rc = run_cmd([
-                    "nixos-container", "create", full_name,
-                    "--config-file", config_file,
-                    "--host-address", "10.100.0.1",
-                    "--local-address", ip
-                ], timeout=600)
-                
-                if rc != 0:
-                    print(f"DEBUG: nixos-container failed: rc={rc}")
-                    print(f"DEBUG: stdout={stdout[:500]}")
-                    print(f"DEBUG: stderr={stderr[:500]}")
-                    errors.append(f"{full_name}: creation failed - {stdout} {stderr}")
-                    continue
-            finally:
-                os.unlink(config_file)
+            if rc != 0:
+                errors.append(f"{full_name}: creation failed - {stderr}")
+                continue
             
             run_cmd(["nixos-container", "start", full_name], timeout=60)
-            container_port = spec.get('containerPort', 80)
-            setup_port_forward(host_port, ip, container_port)
+            setup_port_forward(host_port, ip, 80)  # Assume port 80 inside
             
             db.containers_db[full_name] = {
                 "ip": ip,
                 "host_port": host_port,
-                "container_port": container_port,
-                "config": nix_config,
+                "container_port": 80,
                 "status": "up",
                 "owner": user,
                 "project": project_name,
@@ -413,9 +483,7 @@ async def deploy_project(
             save_db(CONTAINERS_DB_FILE, db.containers_db)
             
             deployed.append(ContainerInfo(
-                name=full_name,
-                status="up",
-                ip=ip,
+                name=full_name, status="up", ip=ip,
                 host_port=host_port,
                 created_at=db.containers_db[full_name]["created_at"],
                 owner=user
@@ -424,14 +492,13 @@ async def deploy_project(
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
     
-    # Build message
     msgs = []
     if deployed:
         msgs.append(f"Created {len(deployed)} containers")
     if destroyed:
         msgs.append(f"Removed {len(destroyed)} obsolete containers")
     if errors:
-        msgs.append(f"{len(errors)} errors")
+        msgs.append(f"{len(errors)} errors: {'; '.join(errors[:3])}")
     
     return ProjectDeployResponse(
         project=project_name,
