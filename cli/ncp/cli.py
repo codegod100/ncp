@@ -212,40 +212,6 @@ def info(ctx, name):
     click.echo()
 
 
-let
-  cfg = config.ncp;
-in
-{
-  # Define NCP options using proper NixOS module system
-  options.ncp = {
-    port = lib.mkOption {
-      type = lib.types.int;
-      description = "External host port to expose the container on";
-      example = 9001;
-    };
-    
-    name = lib.mkOption {
-      type = lib.types.str;
-      description = "Container name (defaults to service name if not set)";
-      default = "";
-    };
-    
-    containerPort = lib.mkOption {
-      type = lib.types.int;
-      description = "Internal container port";
-      default = 80;
-    };
-  };
-
-  # The actual container configuration
-  config = '''
-
-
-NCP_MODULE_SUFFIX = ''';
-}
-'''
-
-
 def parse_nix_config(filepath: str) -> dict:
     """Parse a .nix file for ncp metadata and config.
     
