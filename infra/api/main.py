@@ -126,12 +126,24 @@ def remove_port_forward(host_port: int, container_ip: str, container_port: int):
     ])
 
 def build_container_config(name: str, ip: str, user_config: str) -> str:
-    """Build a NixOS container configuration string"""
+    """Build a NixOS container configuration string (just the body, not a function)"""
     cleaned_config = user_config.strip()
+    # If user wrapped in { }, extract just the body
     if cleaned_config.startswith('{') and cleaned_config.endswith('}'):
-        cleaned_config = cleaned_config[1:-1].strip()
+        # Count braces to find matching end
+        depth = 0
+        end_pos = 0
+        for i, c in enumerate(cleaned_config):
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    end_pos = i
+                    break
+        cleaned_config = cleaned_config[1:end_pos].strip()
     
-    return f'''{{ config, pkgs, lib, ... }}: {{
+    return f'''
   boot.isContainer = true;
   
   networking.useDHCP = false;
@@ -152,7 +164,7 @@ def build_container_config(name: str, ip: str, user_config: str) -> str:
   {cleaned_config}
   
   system.stateVersion = "24.11";
-}}'''
+'''
 
 @app.get("/")
 async def root():
