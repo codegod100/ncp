@@ -326,60 +326,10 @@ async def get_me(user: str = Depends(require_user)):
 
 @app.get("/")
 async def root(user: Optional[str] = Depends(get_current_user)):
-    """Serve HTML page with container list - shows user's containers or public view"""
-    # Get containers accessible to this user
-    all_names = get_all_containers()
-    containers = []
-    
-    for name in all_names:
-        info = containers_db.get(name, {})
-        owner = info.get("owner")
-        
-        # Show if: public, owned by user, or user is admin
-        if not user:
-            # Public view - only show unowned containers
-            if not owner:
-                status = get_container_status(name)
-                containers.append({
-                    "name": name,
-                    "status": status,
-                    "ip": info.get("ip", "-"),
-                    "port": info.get("host_port", "-"),
-                    "owner": owner or "unclaimed"
-                })
-        elif user == "admin" or owner == user or not owner:
-            status = get_container_status(name)
-            containers.append({
-                "name": name,
-                "status": status,
-                "ip": info.get("ip", "-"),
-                "port": info.get("host_port", "-"),
-                "owner": owner or "unclaimed"
-            })
-    
-    auth_section = ""
-    if user:
-        auth_section = f'<p>👤 Logged in as: <b>{user}</b> | <button onclick="doLogout()" style="background:#666;padding:4px 12px;font-size:0.9em;">Logout</button></p>'
-    else:
-        auth_section = '''<p>🔒 <a href="#" onclick="showLogin();return false">Login</a> or 
-        <a href="#" onclick="showRegister();return false">Register</a></p>
-        <div id="login-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;">
-            <h4>Login</h4>
-            <input type="text" id="login-user" placeholder="Username"><br>
-            <input type="password" id="login-pass" placeholder="Password"><br>
-            <button onclick="doLogin()">Login</button>
-            <button onclick="hideForms()" style="background:#666;">Cancel</button>
-            <div id="login-status" style="margin-top:10px;color:#d32f2f;"></div>
-        </div>
-        <div id="register-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;">
-            <h4>Register</h4>
-            <input type="text" id="reg-user" placeholder="Username"><br>
-            <input type="password" id="reg-pass" placeholder="Password"><br>
-            <input type="email" id="reg-email" placeholder="Email (optional)"><br>
-            <button onclick="doRegister()">Register</button>
-            <button onclick="hideForms()" style="background:#666;">Cancel</button>
-            <div id="reg-status" style="margin-top:10px;color:#d32f2f;"></div>
-        </div>'''
+    """Serve HTML page - containers load dynamically via JavaScript"""
+    # Server-side generation of containers is no longer needed
+    # JavaScript will call /api/v1/containers with the token from localStorage
+    pass
     
     html = f"""<!DOCTYPE html>
 <html>
@@ -404,40 +354,42 @@ async def root(user: Optional[str] = Depends(get_current_user)):
         input {{ margin: 5px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
         button {{ background: #007acc; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin: 5px; }}
         button:hover {{ background: #005fa3; }}
+        .loading {{ color: #666; font-style: italic; }}
     </style>
 </head>
 <body>
     <h1>🚀 NCP - Nix Container Platform</h1>
     <p>Dynamic NixOS container deployment on nix.latha.org</p>
     
-    <div class="auth-box">
-        {auth_section}
+    <div class="auth-box" id="auth-box">
+        <p class="loading">Checking authentication...</p>
     </div>
-"""
     
-    if containers:
-        for c in containers:
-            status_class = "up" if c["status"] == "up" else "down"
-            port_str = f":{c['port']}" if c["port"] != "-" else ""
-            owner_badge = f"<span class=\"owner\">👤 {c['owner']}</span>"
-            
-            if c["port"] != "-":
-                service_url = f"http://204.168.220.202:{c['port']}"
-                name_html = f'<a href="{service_url}" target="_blank" style="text-decoration: none; color: #007acc;">{c["name"]}</a>'
-            else:
-                name_html = c['name']
-            
-            html += f"""
-    <div class="container">
-        <h3>{name_html} {owner_badge}</h3>
-        <span class="status {status_class}">{c['status']}</span>
-        <p class="info">IP: {c['ip']}{port_str}</p>
+    <div id="containers-list">
+        <p class="loading">Loading containers...</p>
     </div>
-"""
-    else:
-        html += '<div class="empty"><p>No containers visible</p><p>Login to see your containers</p></div>'
     
-    html += """
+    <div id="login-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;max-width:400px;">
+        <h4>Login</h4>
+        <input type="text" id="login-user" placeholder="Username"><br>
+        <input type="password" id="login-pass" placeholder="Password"><br>
+        <button onclick="doLogin()">Login</button>
+        <button onclick="showRegister()" style="background:#666;">Need account?</button>
+        <button onclick="hideForms()" style="background:#999;">Cancel</button>
+        <div id="login-status" style="margin-top:10px;"></div>
+    </div>
+    
+    <div id="register-form" style="display:none;background:#f0f0f0;padding:15px;border-radius:5px;margin:10px 0;max-width:400px;">
+        <h4>Register</h4>
+        <input type="text" id="reg-user" placeholder="Username"><br>
+        <input type="password" id="reg-pass" placeholder="Password"><br>
+        <input type="email" id="reg-email" placeholder="Email (optional)"><br>
+        <button onclick="doRegister()">Register</button>
+        <button onclick="showLogin()" style="background:#666;">Have account?</button>
+        <button onclick="hideForms()" style="background:#999;">Cancel</button>
+        <div id="reg-status" style="margin-top:10px;"></div>
+    </div>
+    
     <div class="endpoint">
         <h3>API Endpoints</h3>
         <pre>POST /api/v1/auth/register   - Register new user
@@ -445,23 +397,100 @@ POST /api/v1/auth/login      - Login, get token
 GET  /api/v1/auth/me         - Get current user
 GET  /api/v1/containers      - List your containers
 POST /api/v1/containers      - Create container
-GET  /api/v1/containers/{name} - Container details
-POST /api/v1/containers/{name}/restart - Restart
-DELETE /api/v1/containers/{name} - Destroy</pre>
+GET  /api/v1/containers/{{name}} - Container details
+POST /api/v1/containers/{{name}}/restart - Restart
+DELETE /api/v1/containers/{{name}} - Destroy</pre>
     </div>
-    
+"""
+    html += """
     <script>
-        // Show/hide forms
+        // Global token
+        let authToken = localStorage.getItem('ncp_token');
+        let currentUser = null;
+        
+        // Setup fetch with auth
+        function apiFetch(url, options = {}) {
+            options.headers = options.headers || {};
+            if (authToken) {
+                options.headers['Authorization'] = 'Bearer ' + authToken;
+            }
+            return fetch(url, options);
+        }
+        
+        // Check auth status and load containers
+        async function init() {
+            updateAuthUI();
+            await loadContainers();
+        }
+        
+        function updateAuthUI() {
+            const authBox = document.getElementById('auth-box');
+            if (authToken) {
+                authBox.innerHTML = '<p>👤 Logged in | <button onclick="doLogout()" style="background:#666;padding:4px 12px;font-size:0.9em;">Logout</button></p>';
+            } else {
+                authBox.innerHTML = '<p>🔒 <a href="#" onclick="showLogin();return false">Login</a> or <a href="#" onclick="showRegister();return false">Register</a></p>';
+            }
+        }
+        
+        async function loadContainers() {
+            const container = document.getElementById('containers-list');
+            try {
+                const res = await apiFetch('/api/v1/containers');
+                if (!res.ok) {
+                    if (res.status === 401) {
+                        // Not logged in - show public containers (call without auth)
+                        const publicRes = await fetch('/api/v1/containers');
+                        const data = await publicRes.json();
+                        renderContainers(data);
+                        return;
+                    }
+                    throw new Error('Failed to load');
+                }
+                const data = await res.json();
+                currentUser = 'user'; // Mark as logged in
+                renderContainers(data);
+            } catch(e) {
+                container.innerHTML = '<div class="empty"><p>Error loading containers: ' + e.message + '</p></div>';
+            }
+        }
+        
+        function renderContainers(containers) {
+            const container = document.getElementById('containers-list');
+            if (!containers || containers.length === 0) {
+                container.innerHTML = '<div class="empty"><p>No containers visible</p><p>Login to see your containers</p></div>';
+                return;
+            }
+            
+            let html = '';
+            for (const c of containers) {
+                const statusClass = c.status === 'up' ? 'up' : 'down';
+                const portStr = c.host_port ? ':' + c.host_port : '';
+                const ownerBadge = '<span class="owner">👤 ' + (c.owner || 'unclaimed') + '</span>';
+                const nameHtml = c.host_port 
+                    ? '<a href="http://204.168.220.202:' + c.host_port + '" target="_blank" style="text-decoration:none;color:#007acc;">' + c.name + '</a>'
+                    : c.name;
+                
+                html += '<div class="container">';
+                html += '<h3>' + nameHtml + ' ' + ownerBadge + '</h3>';
+                html += '<span class="status ' + statusClass + '">' + c.status + '</span>';
+                html += '<p class="info">IP: ' + (c.ip || '-') + portStr + '</p>';
+                html += '</div>';
+            }
+            container.innerHTML = html;
+        }
+        
         function showLogin() {
             document.getElementById('login-form').style.display = 'block';
             document.getElementById('register-form').style.display = 'none';
             document.getElementById('login-status').textContent = '';
         }
+        
         function showRegister() {
             document.getElementById('register-form').style.display = 'block';
             document.getElementById('login-form').style.display = 'none';
             document.getElementById('reg-status').textContent = '';
         }
+        
         function hideForms() {
             document.getElementById('login-form').style.display = 'none';
             document.getElementById('register-form').style.display = 'none';
@@ -473,6 +502,7 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
             const statusEl = document.getElementById('login-status');
             
             if (!username || !password) {
+                statusEl.style.color = '#d32f2f';
                 statusEl.textContent = 'Please enter username and password';
                 return;
             }
@@ -488,17 +518,20 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    localStorage.setItem('ncp_token', data.access_token);
+                    authToken = data.access_token;
+                    localStorage.setItem('ncp_token', authToken);
                     statusEl.style.color = '#2e7d32';
-                    statusEl.textContent = 'Success! Reloading...';
-                    setTimeout(() => location.reload(), 500);
+                    statusEl.textContent = 'Success!';
+                    hideForms();
+                    updateAuthUI();
+                    await loadContainers();
                 } else {
                     statusEl.style.color = '#d32f2f';
                     statusEl.textContent = data.detail || 'Login failed';
                 }
             } catch(e) {
                 statusEl.style.color = '#d32f2f';
-                statusEl.textContent = 'Network error: ' + e.message;
+                statusEl.textContent = 'Error: ' + e.message;
             }
         }
         
@@ -509,6 +542,7 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
             const statusEl = document.getElementById('reg-status');
             
             if (!username || !password) {
+                statusEl.style.color = '#d32f2f';
                 statusEl.textContent = 'Please enter username and password';
                 return;
             }
@@ -525,12 +559,10 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
                 const data = await res.json();
                 if (res.ok) {
                     statusEl.style.color = '#2e7d32';
-                    statusEl.textContent = 'Registered! Switching to login...';
+                    statusEl.textContent = 'Registered! Please login.';
                     setTimeout(() => {
                         document.getElementById('login-user').value = username;
-                        document.getElementById('login-form').style.display = 'block';
-                        document.getElementById('register-form').style.display = 'none';
-                        statusEl.textContent = '';
+                        showLogin();
                     }, 1000);
                 } else {
                     statusEl.style.color = '#d32f2f';
@@ -538,39 +570,20 @@ DELETE /api/v1/containers/{name} - Destroy</pre>
                 }
             } catch(e) {
                 statusEl.style.color = '#d32f2f';
-                statusEl.textContent = 'Network error: ' + e.message;
+                statusEl.textContent = 'Error: ' + e.message;
             }
         }
         
         function doLogout() {
+            authToken = null;
+            currentUser = null;
             localStorage.removeItem('ncp_token');
-            location.reload();
+            updateAuthUI();
+            loadContainers();
         }
         
-        // Add token to all API requests if logged in
-        const token = localStorage.getItem('ncp_token');
-        if (token) {
-            const originalFetch = window.fetch;
-            window.fetch = function() {
-                let args = Array.from(arguments);
-                if (args[0].startsWith('/api/') && args.length > 1 && typeof args[1] === 'object') {
-                    args[1].headers = args[1].headers || {};
-                    args[1].headers['Authorization'] = 'Bearer ' + token;
-                }
-                return originalFetch.apply(this, args);
-            };
-        }
-        
-        // Check if we're logged in and update UI
-        if (token) {
-            // Replace auth section with logout button
-            document.addEventListener('DOMContentLoaded', function() {
-                const authBox = document.querySelector('.auth-box');
-                if (authBox) {
-                    authBox.innerHTML = '<p>👤 Logged in | <button onclick="doLogout()" style="background:#666;padding:4px 12px;font-size:0.9em;">Logout</button></p>';
-                }
-            });
-        }
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', init);
     </script>
 </body>
 </html>"""
