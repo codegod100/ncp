@@ -173,7 +173,7 @@ def pending(ctx):
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation')
 @click.pass_context
 def apply(ctx, yes):
-    """Apply all pending container changes (runs nixos-rebuild)"""
+    """Apply pending changes on the remote server"""
     client = ctx.obj['client']
     
     # Check if there are pending changes
@@ -183,8 +183,8 @@ def apply(ctx, yes):
         return
     
     names = [p['name'] for p in pending['pending']]
-    click.echo(f"🔄 Applying changes for: {', '.join(names)}")
-    click.echo("   This will run nixos-rebuild switch (may take a few minutes)")
+    click.echo(f"🔄 Requesting apply for: {', '.join(names)}")
+    click.echo("   The server will run nixos-rebuild switch (may take a few minutes)")
     
     if not yes:
         if not click.confirm("   Continue?"):
