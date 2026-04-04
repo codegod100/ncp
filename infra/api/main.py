@@ -184,7 +184,43 @@ def generate_html_page(title: str, body_content: str) -> str:
             return resp.json();
         }}
         
+        async function loadContainers() {{
+            const data = await api('GET', '/containers');
+            const listDiv = document.getElementById('containers-list');
+            if (!data || data.length === 0) {{
+                listDiv.innerHTML = '<p>No containers found.</p>';
+                return;
+            }}
+            
+            // Group by project
+            const byProject = {{}};
+            data.forEach(c => {{
+                const proj = c.project || 'default';
+                if (!byProject[proj]) byProject[proj] = [];
+                byProject[proj].push(c);
+            }});
+            
+            let html = '';
+            Object.keys(byProject).sort().forEach(proj => {{
+                html += '<div class="project"><h2>📁 ' + proj + '</h2>';
+                byProject[proj].forEach(c => {{
+                    const statusClass = c.status === 'up' ? 'up' : 'down';
+                    const portInfo = c.host_port ? ' (Port ' + c.host_port + ')' : '';
+                    const owner = c.owner || 'unclaimed';
+                    const nameDisplay = c.host_port 
+                        ? '<a href="http://204.168.220.202:' + c.host_port + '" target="_blank">' + c.name + '</a>'
+                        : c.name;
+                    html += '<div class="container"><strong>' + nameDisplay + '</strong> ' +
+                           '<span class="status ' + statusClass + '">' + c.status + '</span> ' +
+                           '<span style="color: #666; margin-left: 1rem;">' + owner + portInfo + '</span></div>';
+                }});
+                html += '</div>';
+            }});
+            listDiv.innerHTML = html;
+        }}
+        
         updateAuthUI();
+        loadContainers();
     </script>
 </body>
 </html>'''
@@ -218,43 +254,6 @@ async def root_page(request: Request):
                 alert('Login failed: ' + (data.detail || 'Unknown error'));
             }
         }
-        
-        async function loadContainers() {
-            const data = await api('GET', '/containers');
-            const listDiv = document.getElementById('containers-list');
-            if (!data || data.length === 0) {
-                listDiv.innerHTML = '<p>No containers found.</p>';
-                return;
-            }
-            
-            // Group by project
-            const byProject = {};
-            data.forEach(c => {
-                const proj = c.project || 'default';
-                if (!byProject[proj]) byProject[proj] = [];
-                byProject[proj].push(c);
-            });
-            
-            let html = '';
-            Object.keys(byProject).sort().forEach(proj => {
-                html += '<div class="project"><h2>📁 ' + proj + '</h2>';
-                byProject[proj].forEach(c => {
-                    const statusClass = c.status === 'up' ? 'up' : 'down';
-                    const portInfo = c.host_port ? ' (Port ' + c.host_port + ')' : '';
-                    const owner = c.owner || 'unclaimed';
-                    const nameDisplay = c.host_port 
-                        ? '<a href="http://204.168.220.202:' + c.host_port + '" target="_blank">' + c.name + '</a>'
-                        : c.name;
-                    html += '<div class="container"><strong>' + nameDisplay + '</strong> ' +
-                           '<span class="status ' + statusClass + '">' + c.status + '</span> ' +
-                           '<span style="color: #666; margin-left: 1rem;">' + owner + portInfo + '</span></div>';
-                });
-                html += '</div>';
-            });
-            listDiv.innerHTML = html;
-        }
-        
-        loadContainers();
     </script>
     '''
     
