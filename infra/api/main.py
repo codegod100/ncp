@@ -13,7 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # Import our modules
-from db import init_db, containers_db, users_db, save_db, CONTAINERS_DB_FILE, USERS_DB_FILE
+import db
+from db import init_db, save_db, CONTAINERS_DB_FILE, USERS_DB_FILE
 from models import (
     ContainerInfo, ContainerCreateRequest, ContainerDestroyRequest,
     ProjectDeployRequest, ProjectDeployResponse,
@@ -110,11 +111,11 @@ async def root_page(request: Request):
     visible_containers = []
     
     for name in all_containers:
-        info = containers_db.get(name, {})
+        info = db.containers_db.get(name, {})
         owner = info.get("owner")
         
         # Show if: unowned, or current user owns it, or user is admin
-        if not owner or owner == user or (user and users_db.get(user, {}).get("is_admin")):
+        if not owner or owner == user or (user and db.users_db.get(user, {}).get("is_admin")):
             status = get_container_status(name)
             visible_containers.append({
                 "name": name,
@@ -184,13 +185,13 @@ async def list_containers(user: Optional[str] = Depends(optional_user)):
     result = []
     
     for name in all_names:
-        info = containers_db.get(name, {})
+        info = db.containers_db.get(name, {})
         owner = info.get("owner")
         
         # Public: only unowned. Authenticated: own + unowned. Admin: all.
         if not user and owner:
             continue
-        if user and owner and owner != user and not users_db.get(user, {}).get("is_admin"):
+        if user and owner and owner != user and not db.users_db.get(user, {}).get("is_admin"):
             continue
         
         result.append(ContainerInfo(
@@ -244,7 +245,7 @@ async def create_container(
     setup_port_forward(req.port, ip, req.container_port)
     
     # Save to DB
-    containers_db[full_name] = {
+    db.containers_db[full_name] = {
         "ip": ip,
         "host_port": req.port,
         "container_port": req.container_port,
@@ -254,14 +255,14 @@ async def create_container(
         "created_at": datetime.now().isoformat(),
         "public": req.public
     }
-    save_db(CONTAINERS_DB_FILE, containers_db)
+    save_db(CONTAINERS_DB_FILE, db.containers_db)
     
     return ContainerInfo(
         name=full_name,
         status="up",
         ip=ip,
         host_port=req.port,
-        created_at=containers_db[full_name]["created_at"],
+        created_at=db.containers_db[full_name]["created_at"],
         owner=user
     )
 
@@ -270,12 +271,12 @@ async def create_container(
 async def destroy_container(req: ContainerDestroyRequest, user: str = Depends(require_user)):
     """Destroy a container (owner or admin only)."""
     full_name = req.name[:12]
-    info = containers_db.get(full_name)
+    info = db.containers_db.get(full_name)
     
     if not info:
         raise HTTPException(404, "Container not found")
     
-    if info.get("owner") != user and not users_db.get(user, {}).get("is_admin"):
+    if info.get("owner") != user and not db.users_db.get(user, {}).get("is_admin"):
         raise HTTPException(403, "Not owner of this container")
     
     # Cleanup port forward
@@ -288,9 +289,9 @@ async def destroy_container(req: ContainerDestroyRequest, user: str = Depends(re
         raise HTTPException(500, f"Destroy failed: {stderr}")
     
     # Remove from DB
-    if full_name in containers_db:
-        del containers_db[full_name]
-        save_db(CONTAINERS_DB_FILE, containers_db)
+    if full_name in db.containers_db:
+        del db.containers_db[full_name]
+        save_db(CONTAINERS_DB_FILE, db.containers_db)
     
     return {"success": True, "message": f"Container '{full_name}' destroyed"}
 
@@ -330,7 +331,7 @@ async def deploy_project(
         # Get current state
         existing = get_all_containers()
         current = {
-            name: info for name, info in containers_db.items()
+            name: info for name, info in db.containers_db.items()
             if info.get('owner') == user and info.get('project') == project_name and name in existing
         }
         
@@ -338,22 +339,22 @@ async def deploy_project(
         current_names = set(current.keys())
         
         # Cleanup stale entries
-        stale = {n for n, i in containers_db.items() if i.get('owner') == user and i.get('project') == project_name and n not in existing}
+        stale = {n for n, i in db.containers_db.items() if i.get('owner') == user and i.get('project') == project_name and n not in existing}
         for name in stale:
-            del containers_db[name]
+            del db.containers_db[name]
         if stale:
-            save_db(CONTAINERS_DB_FILE, containers_db)
+            save_db(CONTAINERS_DB_FILE, db.containers_db)
         
         # Destroy obsolete
         for name in current_names - desired_names:
             full_name = name[:12]
-            info = containers_db.get(full_name, {})
+            info = db.containers_db.get(full_name, {})
             if info.get('host_port') and info.get('ip'):
                 remove_port_forward(info['host_port'], info['ip'], info.get('container_port', 80))
             run_cmd(["nixos-container", "destroy", full_name], timeout=60)
-            if full_name in containers_db:
-                del containers_db[full_name]
-                save_db(CONTAINERS_DB_FILE, containers_db)
+            if full_name in db.containers_db:
+                del db.containers_db[full_name]
+                save_db(CONTAINERS_DB_FILE, db.containers_db)
             destroyed.append(full_name)
         
         # Create new
@@ -389,7 +390,7 @@ async def deploy_project(
             container_port = spec.get('containerPort', 80)
             setup_port_forward(host_port, ip, container_port)
             
-            containers_db[full_name] = {
+            db.containers_db[full_name] = {
                 "ip": ip,
                 "host_port": host_port,
                 "container_port": container_port,
@@ -399,14 +400,14 @@ async def deploy_project(
                 "project": project_name,
                 "created_at": datetime.now().isoformat()
             }
-            save_db(CONTAINERS_DB_FILE, containers_db)
+            save_db(CONTAINERS_DB_FILE, db.containers_db)
             
             deployed.append(ContainerInfo(
                 name=full_name,
                 status="up",
                 ip=ip,
                 host_port=host_port,
-                created_at=containers_db[full_name]["created_at"],
+                created_at=db.containers_db[full_name]["created_at"],
                 owner=user
             ))
     
@@ -433,17 +434,17 @@ async def deploy_project(
 @app.post("/api/v1/auth/register")
 async def register(user: UserRegister):
     """Register a new user."""
-    if user.username in users_db:
+    if user.username in db.users_db:
         raise HTTPException(400, "Username already exists")
     
-    users_db[user.username] = {
+    db.users_db[user.username] = {
         "username": user.username,
         "password_hash": hash_password(user.password),
         "email": user.email,
         "created_at": datetime.now().isoformat(),
         "is_admin": False
     }
-    save_db(USERS_DB_FILE, users_db)
+    save_db(USERS_DB_FILE, db.users_db)
     
     token = create_access_token({"sub": user.username})
     return TokenResponse(access_token=token)
@@ -452,7 +453,7 @@ async def register(user: UserRegister):
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
 async def login(creds: UserLogin):
     """Login and get access token."""
-    user = users_db.get(creds.username)
+    user = db.users_db.get(creds.username)
     if not user or not verify_password(creds.password, user["password_hash"]):
         raise HTTPException(401, "Invalid credentials")
     
@@ -463,7 +464,7 @@ async def login(creds: UserLogin):
 @app.get("/api/v1/auth/me")
 async def me(user: str = Depends(require_user)):
     """Get current user info."""
-    info = users_db.get(user, {})
+    info = db.users_db.get(user, {})
     return {"username": user, "is_admin": info.get("is_admin", False)}
 
 
