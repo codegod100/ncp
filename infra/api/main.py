@@ -13,17 +13,17 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # Import our modules
-from .db import init_db, containers_db, users_db, save_db, CONTAINERS_DB_FILE, USERS_DB_FILE
-from .models import (
+from db import init_db, containers_db, users_db, save_db, CONTAINERS_DB_FILE, USERS_DB_FILE
+from models import (
     ContainerInfo, ContainerCreateRequest, ContainerDestroyRequest,
     ProjectDeployRequest, ProjectDeployResponse,
     UserRegister, UserLogin, TokenResponse
 )
-from .auth import (
+from auth import (
     init_default_admin, hash_password, verify_password, create_access_token,
     require_user, optional_user
 )
-from .nix import (
+from nix import (
     get_all_containers, get_container_status, find_next_available_ip,
     setup_port_forward, remove_port_forward, build_container_config,
     parse_flake_containers_nix, run_cmd
