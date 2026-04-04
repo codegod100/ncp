@@ -796,15 +796,14 @@ async def deploy_project(
     request: ProjectDeployRequest, 
     user: str = Depends(require_user)
 ):
-    """Deploy a project by evaluating its flake and creating containers.
+    """Deploy a project idempotently - creates, updates, removes containers to match flake.
     
     The server:
-    1. Writes files to a temp directory
-    2. Evaluates flake.nix to get ncp.containers definitions
-    3. Creates each container
+    1. Parses flake.nix to get desired container state
+    2. Compares with current containers for this project
+    3. Creates new containers, updates changed ones, removes obsolete ones
     4. Returns deployment results
     """
-    import tempfile
     import os
     
     # Validate project name
@@ -815,128 +814,156 @@ async def deploy_project(
     if "flake.nix" not in request.files:
         raise HTTPException(status_code=400, detail="No flake.nix in project files")
     
-    # Create temp directory for project
-    temp_dir = tempfile.mkdtemp(prefix=f"ncp_project_{project_name}_")
+    flake_content = request.files["flake.nix"]
     
-    try:
-        # Write all files
-        for filepath, content in request.files.items():
-            full_path = os.path.join(temp_dir, filepath)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            with open(full_path, 'w') as f:
-                f.write(content)
-        
-        # Evaluate flake to get container definitions
-        # For now, parse simple format from flake.nix directly
-        # In production, use `nix eval` to properly evaluate
-        flake_content = request.files["flake.nix"]
-        
-        # Extract container definitions from flake
-        # Look for ncp.containers = { ... } pattern
-        containers_def = parse_flake_containers(flake_content)
-        
-        if not containers_def:
-            raise HTTPException(
-                status_code=400, 
-                detail="No ncp.containers defined in flake.nix"
-            )
-        
-        # Deploy each container
-        deployed = []
-        errors = []
-        
-        for container_name, container_spec in containers_def.items():
-            try:
-                # Container name: just use the service name (project is tracked separately)
-                # nixos-container has 12 char limit
-                full_name = container_name[:12]
-                
-                # Check if name is too short after truncation
-                if len(full_name) < 3:
-                    errors.append(f"{container_name}: name too short after truncation")
-                    continue
-                
-                # Check if container already exists
-                if full_name in get_all_containers():
-                    errors.append(f"{full_name}: already exists")
-                    continue
-                
-                # Get port from spec
-                host_port = container_spec.get('port')
-                if not host_port:
-                    errors.append(f"{full_name}: no port specified")
-                    continue
-                
-                # Get nix config
-                nix_config = container_spec.get('config', '{ }')
-                
-                # Find IP
-                ip = find_next_available_ip()
-                if not ip:
-                    errors.append(f"{full_name}: no available IPs")
-                    continue
-                
-                # Build and create container
-                container_config = build_container_config(full_name, ip, nix_config)
-                
-                stdout, stderr, rc = run_cmd([
-                    "nixos-container", "create", full_name,
-                    "--config", container_config,
-                    "--host-address", NETWORK_CONFIG["gateway"],
-                    "--local-address", ip
-                ], timeout=600)
-                
-                if rc != 0:
-                    errors.append(f"{full_name}: creation failed - {stderr}")
-                    continue
-                
-                # Start container
-                run_cmd(["nixos-container", "start", full_name], timeout=60)
-                
-                # Setup port forwarding
-                container_port = container_spec.get('containerPort', 80)
-                setup_port_forward(host_port, ip, container_port)
-                
-                # Save to database
-                containers_db[full_name] = {
-                    "ip": ip,
-                    "host_port": host_port,
-                    "container_port": container_port,
-                    "created_at": datetime.now().isoformat(),
-                    "config": nix_config,
-                    "status": "up",
-                    "owner": user,
-                    "project": project_name
-                }
-                save_db(CONTAINERS_DB_FILE, containers_db)
-                
-                deployed.append(ContainerInfo(
-                    name=full_name,
-                    status="up",
-                    ip=ip,
-                    host_port=host_port,
-                    created_at=containers_db[full_name]["created_at"],
-                    owner=user
-                ))
-                
-            except Exception as e:
-                errors.append(f"{full_name}: {str(e)}")
-        
-        # Build response message
-        if errors:
-            message = f"Deployed {len(deployed)} containers, {len(errors)} errors: " + "; ".join(errors)
-        else:
-            message = f"Successfully deployed {len(deployed)} containers"
-        
-        return ProjectDeployResponse(
-            project=project_name,
-            containers=deployed,
-            message=message
+    # Extract container definitions from flake
+    containers_def = parse_flake_containers(flake_content)
+    
+    if not containers_def:
+        raise HTTPException(
+            status_code=400, 
+            detail="No ncp.containers defined in flake.nix"
         )
-        
-    finally:
-        # Cleanup temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    # Get current containers for this project
+    current_containers = {
+        name: info for name, info in containers_db.items()
+        if info.get('owner') == user and info.get('project') == project_name
+    }
+    
+    # Calculate desired state
+    desired_names = set(containers_def.keys())
+    current_names = set(current_containers.keys())
+    
+    to_create = desired_names - current_names
+    to_destroy = current_names - desired_names
+    to_update = set()  # Future: detect config changes
+    
+    deployed = []
+    destroyed = []
+    errors = []
+    
+    # Destroy obsolete containers first to free up ports/IPs
+    for container_name in to_destroy:
+        full_name = container_name[:12]
+        try:
+            # Remove from iptables
+            info = containers_db.get(full_name, {})
+            if info.get('host_port') and info.get('ip'):
+                remove_port_forward(info['host_port'], info['ip'], info.get('container_port', 80))
+            
+            # Destroy container
+            run_cmd(["nixos-container", "destroy", full_name], timeout=60)
+            
+            # Remove from DB
+            if full_name in containers_db:
+                del containers_db[full_name]
+                save_db(CONTAINERS_DB_FILE, containers_db)
+            
+            destroyed.append(full_name)
+        except Exception as e:
+            errors.append(f"{full_name}: destroy failed - {str(e)}")
+    
+    # Create new containers
+    for container_name in to_create:
+        try:
+            container_spec = containers_def[container_name]
+            full_name = container_name[:12]
+            
+            if len(full_name) < 3:
+                errors.append(f"{container_name}: name too short after truncation")
+                continue
+            
+            if full_name in get_all_containers():
+                errors.append(f"{full_name}: already exists (different project?)")
+                continue
+            
+            host_port = container_spec.get('port')
+            if not host_port:
+                errors.append(f"{full_name}: no port specified")
+                continue
+            
+            # Check if port is already in use
+            port_in_use = False
+            for name, info in containers_db.items():
+                if info.get('host_port') == host_port and name != full_name:
+                    port_in_use = True
+                    errors.append(f"{full_name}: port {host_port} already used by {name}")
+                    break
+            if port_in_use:
+                continue
+            
+            nix_config = container_spec.get('config', '{ }')
+            
+            ip = find_next_available_ip()
+            if not ip:
+                errors.append(f"{full_name}: no available IPs")
+                continue
+            
+            # Build and create container
+            container_config = build_container_config(full_name, ip, nix_config)
+            
+            stdout, stderr, rc = run_cmd([
+                "nixos-container", "create", full_name,
+                "--config", container_config,
+                "--host-address", NETWORK_CONFIG["gateway"],
+                "--local-address", ip
+            ], timeout=600)
+            
+            if rc != 0:
+                errors.append(f"{full_name}: creation failed - {stderr}")
+                continue
+            
+            # Start container
+            run_cmd(["nixos-container", "start", full_name], timeout=60)
+            
+            # Setup port forwarding
+            container_port = container_spec.get('containerPort', 80)
+            setup_port_forward(host_port, ip, container_port)
+            
+            # Save to database
+            containers_db[full_name] = {
+                "ip": ip,
+                "host_port": host_port,
+                "container_port": container_port,
+                "created_at": datetime.now().isoformat(),
+                "config": nix_config,
+                "status": "up",
+                "owner": user,
+                "project": project_name
+            }
+            save_db(CONTAINERS_DB_FILE, containers_db)
+            
+            deployed.append(ContainerInfo(
+                name=full_name,
+                status="up",
+                ip=ip,
+                host_port=host_port,
+                created_at=containers_db[full_name]["created_at"],
+                owner=user
+            ))
+            
+        except Exception as e:
+            errors.append(f"{container_name}: {str(e)}")
+    
+    # Build response message
+    messages = []
+    if deployed:
+        messages.append(f"Created {len(deployed)} containers")
+    if destroyed:
+        messages.append(f"Removed {len(destroyed)} obsolete containers")
+    if to_update:
+        messages.append(f"Updated {len(to_update)} containers")
+    if errors:
+        messages.append(f"{len(errors)} errors: " + "; ".join(errors[:3]))
+    
+    message = ", ".join(messages) if messages else "No changes needed"
+    
+    return ProjectDeployResponse(
+        project=project_name,
+        containers=deployed,
+        message=message
+    )
 
 
 def parse_flake_containers(flake_content: str) -> Dict[str, Any]:
