@@ -43,6 +43,14 @@ result-*
 *.pem
 *.secret
 .secrets/
+.env
+.env.*
+
+# Data directories
+data/
+*.db
+*.sqlite
+*.sqlite3
 
 # OS
 .DS_Store
