@@ -132,6 +132,13 @@ in {
       # Enable IP forwarding
       echo 1 > /proc/sys/net/ipv4/ip_forward
       
+      # Enable proxy ARP on container interfaces for inter-container communication
+      for iface in /proc/sys/net/ipv4/conf/ve-*/proxy_arp; do
+        if [ -f "$iface" ]; then
+          echo 1 > "$iface"
+        fi
+      done
+      
       # Allow traffic between containers
       iptables -A FORWARD -i ${bridgeName} -o ${bridgeName} -j ACCEPT
     '';
