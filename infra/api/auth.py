@@ -2,6 +2,7 @@
 
 import os
 import hashlib
+from typing import Optional
 import jwt
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, Depends, Request
@@ -100,6 +101,3 @@ def init_default_admin():
         }
         save_db(USERS_DB_FILE, users_db)
         print("Created default admin user (admin/admin123)")
-
-
-from typing import Optional
