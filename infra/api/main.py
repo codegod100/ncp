@@ -936,17 +936,114 @@ async def deploy_project(
 def parse_flake_containers(flake_content: str) -> Dict[str, Any]:
     """Parse container definitions from flake.nix content.
     
-    This is a simplified parser. In production, use `nix eval`.
+    This is a simplified parser that extracts basic container configs.
+    In production, use `nix eval` for proper evaluation.
     """
     containers = {}
     
-    # Look for ncp.containers = { pattern
+    # Find ncp.containers section using brace counting
     import re
-    match = re.search(r'ncp\.containers\s*=\s*\{([^}]+)\}', flake_content, re.DOTALL)
-    if not match:
+    
+    # Find the start of ncp.containers
+    containers_match = re.search(r'ncp\.containers\s*=\s*\{', flake_content)
+    if not containers_match:
         return containers
     
-    inner = match.group(1)
+    start_idx = containers_match.end() - 1  # Position of opening brace
+    
+    # Find matching closing brace by counting
+    brace_count = 0
+    end_idx = start_idx
+    for i, char in enumerate(flake_content[start_idx:]):
+        if char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            if brace_count == 0:
+                end_idx = start_idx + i
+                break
+    
+    if brace_count != 0:
+        # Unbalanced braces
+        return containers
+    
+    # Extract the inner content (between outer braces)
+    inner = flake_content[start_idx+1:end_idx]
+    
+    # Now parse each container definition
+    # Look for patterns like: container_name = { ... };
+    # We need to handle nested braces again for each container
+    
+    idx = 0
+    while idx < len(inner):
+        # Skip whitespace and comments
+        while idx < len(inner) and inner[idx] in ' \t\n':
+            idx += 1
+        
+        if idx >= len(inner):
+            break
+        
+        # Skip comments
+        if inner[idx:idx+2] == '#':
+            while idx < len(inner) and inner[idx] != '\n':
+                idx += 1
+            continue
+        
+        # Look for container name followed by =
+        name_match = re.match(r'(\w+)\s*=\s*\{', inner[idx:])
+        if not name_match:
+            idx += 1
+            continue
+        
+        container_name = name_match.group(1)
+        container_start = idx + name_match.end() - 1  # Position of opening brace
+        
+        # Find matching closing brace
+        brace_count = 0
+        container_end = container_start
+        for i, char in enumerate(inner[container_start:]):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    container_end = container_start + i
+                    break
+        
+        if brace_count == 0:
+            container_body = inner[container_start+1:container_end]
+            
+            # Parse container spec
+            spec = {}
+            
+            # Extract port
+            port_match = re.search(r'port\s*=\s*(\d+)', container_body)
+            if port_match:
+                spec['port'] = int(port_match.group(1))
+            
+            # Extract containerPort  
+            cp_match = re.search(r'containerPort\s*=\s*(\d+)', container_body)
+            if cp_match:
+                spec['containerPort'] = int(cp_match.group(1))
+            else:
+                spec['containerPort'] = 80
+            
+            # For now, we use a default config
+            # In production, we'd extract the full config = { ... } function
+            spec['config'] = '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
+            
+            containers[container_name] = spec
+            
+            # Move past this container definition
+            idx = container_end + 1
+            
+            # Skip the semicolon if present
+            while idx < len(inner) and inner[idx] in ' \t\n;':
+                idx += 1
+        else:
+            idx += 1
+    
+    return containers
     
     # Parse each container definition (simplified)
     # Look for container_name = { ... };
