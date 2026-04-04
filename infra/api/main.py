@@ -216,7 +216,7 @@ def create_container_imperative(name: str, system_path: str, ip: str) -> bool:
     # Create the container using nixos-container
     stdout, stderr, rc = run_cmd([
         "nixos-container", "create", name,
-        "--ensure-running" if True else "",
+        "--auto-start",
         "--host-address", NETWORK_CONFIG["gateway"],
         "--local-address", ip
     ])
