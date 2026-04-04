@@ -385,10 +385,12 @@ async def deploy_project(
                 "--local-address", ip
             ], timeout=600)
             
-            print(f"DEBUG: nixos-container create rc={rc}, stderr={stderr[:200]}")
+            print(f"DEBUG: rc={rc}")
+            print(f"DEBUG: stdout={stdout[:500]}")
+            print(f"DEBUG: stderr={stderr[:500]}")
             
             if rc != 0:
-                errors.append(f"{full_name}: creation failed - {stderr}")
+                errors.append(f"{full_name}: creation failed - {stdout} {stderr}")
                 continue
             
             run_cmd(["nixos-container", "start", full_name], timeout=60)

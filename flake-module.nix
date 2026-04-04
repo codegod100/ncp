@@ -2,45 +2,36 @@
 # 
 # This module can be imported into your flake to define NCP containers
 # using the flake-parts module system.
-#
-# Example usage in your flake.nix:
-#   imports = [ ncp.flakeModule ];
-#   
-#   ncp.containers.backend = {
-#     name = "my-backend";
-#     port = 9001;
-#     config = { config, pkgs, ... }: {
-#       services.nginx.enable = true;
-#     };
-#   };
 
 { lib, config, ... }:
 
 let
   cfg = config.ncp;
   
-  # Helper to generate container metadata JSON
-  mkContainerPackage = name: containerDef: 
-    builtins.toJSON {
-      inherit name;
-      containerName = containerDef.name;
-      hostPort = containerDef.port;
-      containerPort = containerDef.containerPort;
-    };
+  # Generate a NixOS configuration for each container
+  mkNixosConfig = name: containerDef: { config, pkgs, lib, ... }: {
+    # Base container settings
+    boot.isContainer = true;
+    networking.useDHCP = false;
+    networking.firewall.enable = true;
+    
+    # Container-specific config
+    networking.hostName = lib.mkDefault name;
+    
+    # Apply user's config
+    imports = [
+      (containerDef.config { inherit config pkgs lib; })
+    ];
+  };
 in
 {
   options.ncp = {
     containers = lib.mkOption {
       type = lib.types.attrsOf (lib.types.submodule {
         options = {
-          name = lib.mkOption {
-            type = lib.types.str;
-            description = "Container name";
-          };
-          
           port = lib.mkOption {
             type = lib.types.int;
-            description = "External host port";
+            description = "External host port for this container";
           };
           
           containerPort = lib.mkOption {
@@ -50,8 +41,8 @@ in
           };
           
           config = lib.mkOption {
-            type = lib.types.raw;
-            description = "NixOS configuration function";
+            type = lib.types.functionTo lib.types.attrs;
+            description = "NixOS configuration function: { config, pkgs, ... }: { ... }";
           };
         };
       });
@@ -61,12 +52,12 @@ in
   };
 
   config = lib.mkIf (cfg.containers != {}) {
-    # Expose container metadata as packages
-    # The CLI can use these to get deployment info
-    perSystem = { system, pkgs, ... }: {
-      packages = lib.mapAttrs' (name: containerDef:
-        lib.nameValuePair "ncp-${name}" (mkContainerPackage name containerDef)
-      ) cfg.containers;
-    };
+    # Export as nixosConfigurations for nixos-container --flake
+    nixosConfigurations = lib.mapAttrs (name: containerDef:
+      lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [ (mkNixosConfig name containerDef) ];
+      }
+    ) cfg.containers;
   };
 }
