@@ -388,8 +388,10 @@ async def deploy_project(
                 ], timeout=600)
                 
                 if rc != 0:
-                    print(f"DEBUG: nixos-container failed: rc={rc}, stderr={stderr[:500]}")
-                    errors.append(f"{full_name}: creation failed - {stderr}")
+                    print(f"DEBUG: nixos-container failed: rc={rc}")
+                    print(f"DEBUG: stdout={stdout[:500]}")
+                    print(f"DEBUG: stderr={stderr[:500]}")
+                    errors.append(f"{full_name}: creation failed - {stdout} {stderr}")
                     continue
             finally:
                 os.unlink(config_file)
