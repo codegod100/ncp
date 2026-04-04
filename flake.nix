@@ -7,7 +7,16 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    {
+      # Export the flake module for projects to import
+      flakeModule = import ./flake-module.nix;
+      
+      # Also re-export under ncp namespace for convenience
+      lib = {
+        flakeModule = import ./flake-module.nix;
+      };
+    }
+    // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         python = pkgs.python3;

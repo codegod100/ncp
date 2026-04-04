@@ -212,46 +212,151 @@ def info(ctx, name):
     click.echo()
 
 
-@cli.command(name='deploy')
-@click.option('--name', required=True, help='Container name')
-@click.option('--port', default=8080, help='External port to expose')
-@click.option('--config', '-c', help='Nix config file to use')
-@click.pass_context
-def deploy(ctx, name, port, config):
-    """Deploy a container from a Nix config file"""
-    client = ctx.obj['client']
+NCP_MODULE_PREFIX = '''{ config, pkgs, lib, ... }:
+
+let
+  cfg = config.ncp;
+in
+{
+  # Define NCP options using proper NixOS module system
+  options.ncp = {
+    port = lib.mkOption {
+      type = lib.types.int;
+      description = "External host port to expose the container on";
+      example = 9001;
+    };
     
-    # Read config file
-    if config:
-        with open(config, 'r') as f:
-            nix_config = f.read()
-    else:
-        # Default nginx config
-        nix_config = '''{
-  services.nginx = {
-    enable = true;
-    virtualHosts.default = {
-      default = true;
-      root = "${pkgs.nginx}/html";
-      locations."/" = {
-        index = "index.html";
-      };
+    name = lib.mkOption {
+      type = lib.types.str;
+      description = "Container name (defaults to service name if not set)";
+      default = "";
+    };
+    
+    containerPort = lib.mkOption {
+      type = lib.types.int;
+      description = "Internal container port";
+      default = 80;
     };
   };
-  networking.firewall.allowedTCPPorts = [ 80 ];
-}'''
+
+  # The actual container configuration
+  config = '''
+
+
+NCP_MODULE_SUFFIX = ''';
+}
+'''
+
+
+def parse_nix_config(filepath: str) -> dict:
+    """Parse a .nix file for ncp metadata and config.
+    
+    Uses lib.mkOption pattern - extracts ncp.port, ncp.name from a proper
+    NixOS module that defines these options.
+    
+    Returns dict with:
+    - nix_config: the wrapped Nix expression (with NCP module included)
+    - host_port: extracted from ncp.port, or None
+    - container_name: extracted from ncp.name, or None
+    """
+    with open(filepath, 'r') as f:
+        user_config = f.read()
+    
+    result = {
+        'nix_config': '',
+        'host_port': None,
+        'container_name': None
+    }
+    
+    import re
+    
+    # Extract ncp metadata from user's config
+    # Look for ncp.port = XXXX (with or without lib.mkDefault)
+    port_match = re.search(r'ncp\.port\s*=\s*(?:lib\.)?mk(?:Default|Force)?\s+(\d+)', user_config)
+    if not port_match:
+        port_match = re.search(r'ncp\.port\s*=\s*(\d+)', user_config)
+    if port_match:
+        result['host_port'] = int(port_match.group(1))
+    
+    # Look for ncp.name = "XXXX" or ncp.name = XXXX
+    name_match = re.search(r'ncp\.name\s*=\s*(?:lib\.)?mk(?:Default|Force)?\s*"([^"]+)"', user_config)
+    if not name_match:
+        name_match = re.search(r"ncp\.name\s*=\s*(?:lib\.)?mk(?:Default|Force)?\s*'([^']+)'", user_config)
+    if not name_match:
+        name_match = re.search(r'ncp\.name\s*=\s*"([^"]+)"', user_config)
+    if not name_match:
+        name_match = re.search(r"ncp\.name\s*=\s*'([^']+)'", user_config)
+    if name_match:
+        result['container_name'] = name_match.group(1)
+    
+    # Wrap the user's config with our NCP module
+    # This allows the ncp.* options to be valid NixOS options
+    result['nix_config'] = NCP_MODULE_PREFIX + user_config + NCP_MODULE_SUFFIX
+    
+    return result
+
+
+@cli.command(name='deploy')
+@click.argument('service')
+@click.option('--config', '-c', help='Path to .nix config file (default: {service}.nix)')
+@click.pass_context
+def deploy(ctx, service, config):
+    """Deploy a container from a Nix config file.
+    
+    Usage: ncp deploy SERVICE
+    
+    Looks for {SERVICE}.nix by default, or use --config to specify path.
+    Port must be specified in the .nix file with: # ncp: port=XXXX
+    
+    Example:
+        ncp deploy myapp          # Uses myapp.nix
+        ncp deploy myapp -c ./configs/web.nix
+    """
+    client = ctx.obj['client']
+    
+    # Determine config file path
+    if config:
+        config_path = config
+    else:
+        config_path = f"{service}.nix"
+    
+    # Check if file exists
+    if not os.path.exists(config_path):
+        click.echo(f"❌ Config file not found: {config_path}", err=True)
+        click.echo(f"   Expected {service}.nix in current directory", err=True)
+        click.echo(f"   Or specify path: ncp deploy {service} -c /path/to/config.nix", err=True)
+        sys.exit(1)
+    
+    # Parse the config file
+    try:
+        parsed = parse_nix_config(config_path)
+    except Exception as e:
+        click.echo(f"❌ Failed to read {config_path}: {e}", err=True)
+        sys.exit(1)
+    
+    # Get port from metadata or error
+    host_port = parsed['host_port']
+    if not host_port:
+        click.echo(f"❌ No port specified in {config_path}", err=True)
+        click.echo(f"   Add this comment to your .nix file:", err=True)
+        click.echo(f"   # ncp: port=9001", err=True)
+        sys.exit(1)
+    
+    # Use name from metadata or service name
+    container_name = parsed['container_name'] or service
     
     spec = {
-        "name": name,
-        "description": f"Container {name} deployed via ncp CLI",
-        "nix_config": nix_config,
-        "host_port": port,
+        "name": container_name,
+        "description": f"Container {container_name} deployed via ncp CLI",
+        "nix_config": parsed['nix_config'],
+        "host_port": host_port,
         "container_port": 80,
         "auto_start": True
     }
     
-    click.echo(f"🚀 Deploying container '{name}'...")
-    click.echo(f"   Port mapping: {port} → 80 (container)")
+    click.echo(f"🚀 Deploying container '{container_name}'...")
+    click.echo(f"   Config: {config_path}")
+    click.echo(f"   Port mapping: {host_port} → 80 (container)")
     click.echo(f"   ⏳ Building and starting (this may take a minute)...")
     
     try:
@@ -259,7 +364,7 @@ def deploy(ctx, name, port, config):
         click.echo(f"✅ Container deployed and running!")
         click.echo(f"   Status: {result['status']}")
         click.echo(f"   IP: {result.get('ip') or 'auto-assigned'}")
-        click.echo(f"   Access: http://204.168.220.202:{port}")
+        click.echo(f"   Access: http://204.168.220.202:{host_port}")
     except SystemExit:
         click.echo("❌ Deployment failed", err=True)
         sys.exit(1)
@@ -270,8 +375,44 @@ def deploy(ctx, name, port, config):
 @click.option('--port', default=8082, help='External port to expose')
 @click.pass_context
 def deploy_demo(ctx, name, port):
-    """Deploy a demo nginx container"""
-    ctx.invoke(deploy, name=name, port=port, config=None)
+    """Deploy a demo nginx container (legacy, use 'deploy' instead)"""
+    client = ctx.obj['client']
+    
+    nix_config = f'''# ncp: port={port}
+# ncp: name={name}
+{{
+  services.nginx = {{
+    enable = true;
+    virtualHosts.default = {{
+      default = true;
+      root = "${{pkgs.nginx}}/html";
+      locations."/" = {{
+        index = "index.html";
+      }};
+    }};
+  }};
+  networking.firewall.allowedTCPPorts = [ 80 ];
+}}'''
+    
+    spec = {
+        "name": name,
+        "description": f"Demo container {name}",
+        "nix_config": nix_config,
+        "host_port": port,
+        "container_port": 80,
+        "auto_start": True
+    }
+    
+    click.echo(f"🚀 Deploying demo container '{name}'...")
+    click.echo(f"   Port mapping: {port} → 80 (container)")
+    
+    try:
+        result = client.create_container(spec)
+        click.echo(f"✅ Container deployed!")
+        click.echo(f"   Access: http://204.168.220.202:{port}")
+    except SystemExit:
+        click.echo("❌ Deployment failed", err=True)
+        sys.exit(1)
 
 
 @cli.command()

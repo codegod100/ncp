@@ -3,6 +3,11 @@
 # A simple JSON API with CORS headers enabled.
 # Frontend containers can fetch() from this backend.
 
+# ncp.port = 9001;
+# ncp.name = "backend-api";
+
+{ config, pkgs, ... }:
+
 {
   # Enable nginx web server
   services.nginx.enable = true;
@@ -25,7 +30,7 @@
     
     # Return JSON for all requests
     locations."/" = {
-      return = ''200 '{"message": "Hello from backend", "service": "api", "version": "1.0"}''';
+      return = ''200 '{"message": "Hello from backend", "service": "api", "version": "1.0"}';
     };
   };
   
