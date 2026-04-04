@@ -1,5 +1,5 @@
 # Infrastructure Host Configuration
-# Manages the container subnet, routing, and all containers on Hetzner
+# Manages dynamic NixOS containers via NCP API
 
 { config, pkgs, lib, containerNetwork, ... }:
 
@@ -7,13 +7,6 @@ let
   bridgeName = "ctrs";
   subnet = containerNetwork.subnet;
   gateway = containerNetwork.gateway;
-  
-  # Import dynamically created container configs from /etc/nix-fly/containers/
-  # These are created by the API
-  dynamicContainerConfigs = 
-    if builtins.pathExists /etc/nix-fly/containers/imports.nix 
-    then import /etc/nix-fly/containers/imports.nix
-    else [];
 
 in {
   boot.loader.grub.enable = true;
@@ -60,69 +53,40 @@ in {
     externalInterface = "enp1s0";
   };
 
-  # Nix-Fly API Service (v2 with staging/apply workflow)
-  systemd.services.nix-fly-api = {
-    description = "Nix-Fly Container Management API";
+  # NCP API Service (dynamic imperative containers, no rebuilds)
+  systemd.services.ncp-api = {
+    description = "NCP Container Management API";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" ];
     
-    path = with pkgs; [ nixos-container iptables bash coreutils config.system.build.nixos-rebuild ];
+    path = with pkgs; [ nixos-container iptables bash coreutils nix ];
     
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkgs.python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic ])}/bin/python3 /home/nixos/code/nixos-infra-host/api/main.py";
+      ExecStart = "${pkgs.python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic ])}/bin/python3 /home/nixos/code/ncp/infra/api/main.py";
       Restart = "always";
       RestartSec = 5;
       User = "root";
       Group = "root";
-      StateDirectory = "nix-fly";
+      StateDirectory = "ncp";
     };
   };
 
-  # Caddy reverse proxy with API
+  # Caddy reverse proxy
   services.caddy = {
     enable = true;
     
     extraConfig = ''
       nix.latha.org {
-        # Nix-Fly API at /fly/*
-        handle_path /fly/* {
+        # NCP API at /api/*
+        handle_path /api/* {
           reverse_proxy localhost:8000
         }
         
-        # API Server at /api/*
-        handle /api/* {
-          uri strip_prefix /api
-          reverse_proxy ${containerNetwork.containers.api-server.ip}:3000
-        }
-        
-        # Worker at /worker/*
-        handle /worker/* {
-          uri strip_prefix /worker
-          reverse_proxy ${containerNetwork.containers.worker.ip}:3000
-        }
-        
-        # Info page at root - with proper HTML content-type
+        # Info page at root
         handle {
           header Content-Type "text/html; charset=utf-8"
-          respond <<HTML
-<!DOCTYPE html>
-<html>
-<head><title>NixOS Container Infrastructure</title></head>
-<body>
-<h1>NixOS Container Infrastructure - nix.latha.org</h1>
-<h2>Nix-Fly API</h2>
-<p>Container management API available at <a href="/fly/">/fly/</a></p>
-<h2>Services</h2>
-<ul>
-  <li><a href="/fly/">Nix-Fly API</a> - Container management</li>
-  <li><a href="/api/health">API Health</a> (${containerNetwork.containers.api-server.ip}:3000)</li>
-  <li><a href="/worker/health">Worker Health</a> (${containerNetwork.containers.worker.ip}:3000)</li>
-  <li>PostgreSQL: ${containerNetwork.containers.postgres.ip}:5432</li>
-</ul>
-</body>
-</html>
-HTML 200
+          respond "<h1>NCP - Nix Container Platform</h1><p>API at <a href='/api/'>/api/</a></p>" 200
         }
       }
       
@@ -131,41 +95,28 @@ HTML 200
       }
       
       :80 {
-        handle_path /fly/* {
+        handle_path /api/* {
           reverse_proxy localhost:8000
-        }
-        
-        handle /api/* {
-          uri strip_prefix /api
-          reverse_proxy ${containerNetwork.containers.api-server.ip}:3000
-        }
-        
-        handle /worker/* {
-          uri strip_prefix /worker
-          reverse_proxy ${containerNetwork.containers.worker.ip}:3000
         }
         
         handle {
           header Content-Type "text/html; charset=utf-8"
-          respond "<h1>NixOS Container Infrastructure</h1><p>API at <a href='/fly/'>/fly/</a> | Use <a href='https://nix.latha.org'>https://nix.latha.org</a></p>" 200
+          respond "<h1>NCP - Nix Container Platform</h1><p>API at <a href='/api/'>/api/</a></p>" 200
         }
       }
     '';
   };
 
-  # Firewall with port forwarding to containers
+  # Firewall
   networking.firewall = {
     enable = true;
     trustedInterfaces = [ bridgeName ];
     
     allowedTCPPorts = [ 
-      22      # SSH to host
+      22      # SSH
       80      # HTTP (Caddy)
       443     # HTTPS (Caddy)
-      8000    # Nix-Fly API (internal)
-      8080    # API Server (direct)
-      8081    # Worker (direct)
-      5432    # PostgreSQL (direct)
+      8000    # NCP API (internal)
     ];
     
     extraCommands = ''
@@ -174,24 +125,6 @@ HTML 200
       
       # Allow traffic between containers
       iptables -A FORWARD -i ${bridgeName} -o ${bridgeName} -j ACCEPT
-      
-      # DNAT: Forward external traffic to containers (direct access)
-      # API Server: 8080 -> 10.100.1.10:3000
-      iptables -t nat -A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination ${containerNetwork.containers.api-server.ip}:3000
-      iptables -t nat -A POSTROUTING -p tcp --dport 3000 -d ${containerNetwork.containers.api-server.ip} -j MASQUERADE
-      
-      # Worker: 8081 -> 10.100.2.10:3000
-      iptables -t nat -A PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${containerNetwork.containers.worker.ip}:3000
-      iptables -t nat -A POSTROUTING -p tcp --dport 3000 -d ${containerNetwork.containers.worker.ip} -j MASQUERADE
-      
-      # PostgreSQL: 5432 -> 10.100.3.10:5432
-      iptables -t nat -A PREROUTING -p tcp --dport 5432 -j DNAT --to-destination ${containerNetwork.containers.postgres.ip}:5432
-      iptables -t nat -A POSTROUTING -p tcp --dport 5432 -d ${containerNetwork.containers.postgres.ip} -j MASQUERADE
-      
-      # Also allow local host access to containers via DNAT
-      iptables -t nat -A OUTPUT -o lo -p tcp --dport 8080 -j DNAT --to-destination ${containerNetwork.containers.api-server.ip}:3000
-      iptables -t nat -A OUTPUT -o lo -p tcp --dport 8081 -j DNAT --to-destination ${containerNetwork.containers.worker.ip}:3000
-      iptables -t nat -A OUTPUT -o lo -p tcp --dport 5432 -j DNAT --to-destination ${containerNetwork.containers.postgres.ip}:5432
     '';
   };
 
@@ -203,64 +136,18 @@ HTML 200
       bind-interfaces = true;
       domain-needed = true;
       bogus-priv = true;
-      address = [
-        "/api-server.ctrs/${containerNetwork.containers.api-server.ip}"
-        "/worker.ctrs/${containerNetwork.containers.worker.ip}"
-        "/postgres.ctrs/${containerNetwork.containers.postgres.ip}"
-      ];
     };
   };
 
-  # Containers with private network
-  # Static containers (defined in this file)
-  containers = {
-    api-server = {
-      autoStart = true;
-      ephemeral = false;
-      privateNetwork = true;
-      hostAddress = gateway;
-      localAddress = containerNetwork.containers.api-server.ip;
-      
-      config = { config, pkgs, lib, ... }: {
-        imports = [ ../containers/api-server.nix ];
-      };
-    };
-    
-    worker = {
-      autoStart = true;
-      ephemeral = false;
-      privateNetwork = true;
-      hostAddress = gateway;
-      localAddress = containerNetwork.containers.worker.ip;
-      
-      config = { config, pkgs, lib, ... }: {
-        imports = [ ../containers/worker.nix ];
-      };
-    };
-    
-    postgres = {
-      autoStart = true;
-      ephemeral = false;
-      privateNetwork = true;
-      hostAddress = gateway;
-      localAddress = containerNetwork.containers.postgres.ip;
-      
-      config = { config, pkgs, lib, ... }: {
-        imports = [ ../containers/postgres.nix ];
-      };
-    };
-  };
-
-  # Import dynamically created container configs from API
-  # These are stored in /etc/nix-fly/containers/ as individual .nix files
-  imports = dynamicContainerConfigs;
+  # No static containers - all dynamic via NCP API
+  containers = {};
 
   environment.systemPackages = with pkgs; [
     nixos-container systemd iproute2 iptables bridge-utils tcpdump curl jq htop vim git socat
     (python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic requests ]))
   ];
 
-  environment.etc."infra-tools.sh".source = pkgs.writeShellScript "infra-tools" ''
+  environment.etc."ncp-tools.sh".source = pkgs.writeShellScript "ncp-tools" ''
     #!/usr/bin/env bash
     
     CMD="$1"
@@ -272,29 +159,19 @@ HTML 200
         nixos-container list 2>/dev/null || echo "No containers"
         
         echo ""
-        echo "=== Network Status ==="
-        ip addr show ${bridgeName} 2>/dev/null || echo "Bridge ${bridgeName} not found"
-        
-        echo ""
         echo "=== Service Status ==="
         echo "Caddy: $(systemctl is-active caddy 2>/dev/null)"
-        echo "Nix-Fly API: $(systemctl is-active nix-fly-api 2>/dev/null)"
+        echo "NCP API: $(systemctl is-active ncp-api 2>/dev/null)"
         
         echo ""
-        echo "=== Port Tests ==="
-        for port in 80 443 8000 8080 8081 5432; do
-          if timeout 2 bash -c "cat < /dev/null > /dev/tcp/localhost/\$port" 2>/dev/null; then
-            echo "Port \$port: open"
-          else
-            echo "Port \$port: closed"
-          fi
-        done
+        echo "=== API Test ==="
+        curl -s http://localhost:8000/ | jq -r '.version, .description' 2>/dev/null || echo "API not responding"
         ;;
         
       logs)
         CTR="$1"
         if [ -z "$CTR" ]; then
-          echo "Usage: infra logs <container-name>"
+          echo "Usage: ncp logs <container-name>"
           exit 1
         fi
         nixos-container run $CTR -- journalctl -f
@@ -303,52 +180,32 @@ HTML 200
       shell)
         CTR="$1"
         if [ -z "$CTR" ]; then
-          echo "Usage: infra shell <container-name>"
+          echo "Usage: ncp shell <container-name>"
           exit 1
         fi
         nixos-container root-login $CTR
         ;;
         
       api-logs)
-        journalctl -u nix-fly-api -f
-        ;;
-        
-      test)
-        echo "=== Testing Services ==="
-        echo ""
-        echo "Nix-Fly API:"
-        curl -s http://localhost:8000/ 2>&1 | head -1 || echo "Failed"
-        echo ""
-        echo "Caddy HTTP (port 80):"
-        curl -s http://localhost/ 2>&1 | head -1 || echo "Failed"
-        echo ""
-        echo "API via Caddy /api/health:"
-        curl -s http://localhost/api/health 2>&1 || echo "Failed"
+        journalctl -u ncp-api -f
         ;;
         
       *)
-        echo "Container Infrastructure Manager"
+        echo "NCP - Nix Container Platform"
         echo ""
         echo "Commands:"
-        echo "  status         - Show container and network status"
+        echo "  status         - Show container and service status"
         echo "  logs <ctr>     - Follow container logs"
         echo "  shell <ctr>    - Root shell in container"
-        echo "  api-logs       - Follow API service logs"
-        echo "  test           - Test all services"
+        echo "  api-logs       - Follow NCP API logs"
         echo ""
-        echo "Nix-Fly API:"
-        echo "  https://nix.latha.org/fly/         - API docs and endpoints"
-        echo "  curl https://nix.latha.org/fly/api/v1/containers"
-        echo ""
-        echo "Services:"
-        echo "  https://nix.latha.org/api/         - API Server (container)"
-        echo "  https://nix.latha.org/worker/      - Worker (container)"
+        echo "API: https://nix.latha.org/api/"
         ;;
     esac
   '';
 
   environment.shellAliases = {
-    infra = "bash /etc/infra-tools.sh";
+    ncp = "bash /etc/ncp-tools.sh";
   };
 
   services.openssh = {
