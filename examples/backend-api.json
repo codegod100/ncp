@@ -1,0 +1,6 @@
+{
+  "name": "my-backend",
+  "host_port": 9001,
+  "container_port": 80,
+  "nix_config": "services.nginx.enable = true; services.nginx.virtualHosts.default = { default = true; extraConfig = '' add_header Access-Control-Allow-Origin * always; add_header Access-Control-Allow-Methods \\"GET, POST, OPTIONS\\" always; add_header Access-Control-Allow-Headers \\"Content-Type\\" always; if (\\$request_method = OPTIONS) { return 204; } ''; locations.\\"/\\" = { return = \\"200 '{\\\\\\"message\\\\\\": \\\\\\"Hello from backend\\\\\\", \\\\\\"service\\\\\\": \\\\\\"api\\\\\\"}'\\"; }; }; networking.firewall.allowedTCPPorts = [ 80 ];"
+}
