@@ -213,9 +213,10 @@ def create_container_imperative(name: str, system_path: str, ip: str) -> bool:
         if rc != 0:
             raise Exception(f"Failed to copy system: {stderr}")
     
-    # Create the container using nixos-container
+    # Create the container using nixos-container with our built system
     stdout, stderr, rc = run_cmd([
         "nixos-container", "create", name,
+        "--system-path", container_root,
         "--auto-start",
         "--host-address", NETWORK_CONFIG["gateway"],
         "--local-address", ip
