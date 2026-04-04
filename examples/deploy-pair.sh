@@ -1,6 +1,6 @@
 #!/bin/bash
 # Quick deploy script for frontend+backend example pair using ncp CLI
-# Usage: ncp login --server https://nix.latha.org && ./deploy-pair.sh
+# Usage: ncp login && ./deploy-pair.sh
 
 set -e
 
@@ -9,11 +9,14 @@ HOST_IP="204.168.220.202"  # Change to your server's IP
 echo "=== Deploying Example Backend + Frontend ==="
 echo ""
 
-# Check if logged in
-if ! ncp token >/dev/null 2>&1; then
-    echo "Error: Not logged in. Run: ncp login --server https://nix.latha.org"
+# Check auth status
+if ! ncp status 2>/dev/null | grep -q "Authenticated"; then
+    echo "❌ Not authenticated. Please run: ncp login"
     exit 1
 fi
+
+echo "✅ Authenticated"
+echo ""
 
 echo "Deploying backend (example-backend:9101)..."
 ncp deploy --name example-backend --port 9101 --config backend-api.nix

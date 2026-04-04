@@ -4,13 +4,24 @@ Example NixOS container configurations for the ncp (Nix Container Platform).
 
 ## Quick Start
 
-1. **Login with ncp CLI:**
+1. **Check status:**
 ```bash
-ncp login --server https://nix.latha.org
+ncp status
+```
+
+2. **Login:**
+```bash
+ncp login
 # Enter your username and password
 ```
 
-2. **Deploy an example:**
+3. **Verify login:**
+```bash
+ncp status
+# Should show: ✅ Auth Status: Authenticated
+```
+
+4. **Deploy an example:**
 ```bash
 ncp deploy --name my-backend --port 9001 --config backend-api.nix
 ```
@@ -137,8 +148,12 @@ Generic frontend that can fetch from any backend.
 
 ### Option 1: ncp CLI (Recommended)
 ```bash
-# Login once
-ncp login --server https://nix.latha.org
+# Login first
+ncp login
+# Enter your username and password when prompted
+
+# Check status
+ncp status
 
 # Deploy
 ncp deploy --name my-container --port 9001 --config backend-api.nix
@@ -152,8 +167,8 @@ ncp destroy my-container
 
 ### Option 2: Bash quick deploy (`deploy-pair.sh`)
 ```bash
-# Make sure you're logged in first
-ncp login --server https://nix.latha.org
+# Set your token first
+export NCP_TOKEN=your_token_here
 
 # Deploy both backend and frontend
 ./deploy-pair.sh
@@ -161,10 +176,12 @@ ncp login --server https://nix.latha.org
 
 ### Option 3: Manual curl with JSON
 ```bash
-# Get token
-TOKEN=$(ncp token)
+# Get token via API
+curl -X POST https://nix.latha.org/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user","password":"pass"}'
 
-# Deploy via curl
+# Then deploy via curl
 curl -X POST https://nix.latha.org/api/v1/containers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -175,10 +192,15 @@ curl -X POST https://nix.latha.org/api/v1/containers \
 
 | Command | Description |
 |---------|-------------|
-| `ncp login --server URL` | Authenticate and save token |
-| `ncp token` | Show current auth token |
+| `ncp status` | Show auth status and server connection |
+| `ncp login` | Authenticate interactively (prompts for user/pass) |
 | `ncp deploy --name X --port Y --config FILE.nix` | Deploy container |
 | `ncp list` | List your containers |
+| `ncp info NAME` | Show container details |
+| `ncp logs NAME [-f]` | Show/stream container logs |
+| `ncp restart NAME` | Restart a container |
+| `ncp destroy NAME` | Destroy a container |
+| `ncp version` | Show version info |
 | `ncp destroy NAME` | Remove container |
 | `ncp logs NAME` | View container logs |
 

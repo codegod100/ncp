@@ -96,14 +96,17 @@ def cli(ctx, api_url, token):
     Deploy and manage NixOS containers dynamically.
     
     Workflow (Dynamic Mode):
-        ncp deploy-demo --name my-app    # Deploy and start immediately!
-        ncp list                          # View running containers
-        ncp logs my-app -f                # Stream logs
-        ncp destroy my-app                # Destroy immediately
+        ncp login                        # Authenticate interactively
+        ncp status                       # Verify auth
+        ncp deploy --name my-app         # Deploy and start immediately!
+        ncp list                         # View running containers
+        ncp logs my-app -f               # Stream logs
+        ncp destroy my-app               # Destroy immediately
     
     Commands:
-        list, deploy, deploy-demo         # Container lifecycle
-        info, logs, restart, destroy      # Container management
+        login, status                      # Authentication
+        list, deploy, deploy-demo          # Container lifecycle
+        info, logs, restart, destroy       # Container management
     """
     ctx.ensure_object(dict)
     ctx.obj['client'] = NCPClient(api_url, token)
@@ -261,6 +264,87 @@ def logs(ctx, name, follow, lines):
             click.echo("\n\n👋 Log streaming stopped.")
     else:
         click.echo(response.text)
+
+
+@cli.command()
+@click.pass_context
+def status(ctx):
+    """Show authentication and connection status"""
+    client = ctx.obj['client']
+    
+    click.echo("\n🔐 ncp Status")
+    click.echo("─" * 40)
+    
+    # API URL
+    click.echo(f"📡 API URL:    {client.base_url}")
+    
+    # Auth status
+    if client.token:
+        # Mask the token for display
+        token_display = client.token[:20] + "..." if len(client.token) > 20 else client.token
+        click.echo(f"🔑 Auth Token: {token_display}")
+        
+        # Try to validate by making a request
+        try:
+            containers = client.list_containers()
+            click.echo(f"✅ Auth Status: Authenticated")
+            click.echo(f"📦 Containers: {len(containers)} found")
+        except SystemExit:
+            click.echo(f"⚠️  Auth Status: Token invalid or expired")
+    else:
+        click.echo(f"❌ Auth Status: Not logged in")
+        click.echo(f"   Run: ncp login")
+    
+    click.echo()
+
+
+@cli.command()
+@click.option('--username', '-u', prompt=True, help='Your username')
+@click.option('--password', '-p', prompt=True, hide_input=True, help='Your password')
+@click.pass_context
+def login(ctx, username, password):
+    """Authenticate and get API token"""
+    client = ctx.obj['client']
+    
+    click.echo(f"\n🔐 Logging in to {client.base_url}...")
+    
+    try:
+        response = requests.post(
+            client._url('/api/v1/auth/login'),
+            json={"username": username, "password": password}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get('access_token')
+            
+            if token:
+                click.echo("✅ Login successful!")
+                click.echo("")
+                click.echo("🔑 Your API token:")
+                click.echo(f"   {token}")
+                click.echo("")
+                click.echo("📋 To use this token, run:")
+                click.echo(f"   export NCP_TOKEN={token}")
+                click.echo("")
+                click.echo("💡 Or add to your shell profile:")
+                click.echo(f"   echo 'export NCP_TOKEN={token}' >> ~/.bashrc")
+            else:
+                click.echo("⚠️  Login succeeded but no token received")
+        elif response.status_code == 401:
+            click.echo("❌ Login failed: Invalid username or password")
+        else:
+            click.echo(f"❌ Login failed: {response.status_code}")
+            try:
+                error = response.json()
+                click.echo(f"   {error.get('detail', response.text)}")
+            except:
+                click.echo(f"   {response.text}")
+    except requests.exceptions.ConnectionError:
+        click.echo(f"❌ Cannot connect to {client.base_url}")
+        click.echo("   Check your internet connection and API URL")
+    except Exception as e:
+        click.echo(f"❌ Error: {e}")
 
 
 @cli.command()
