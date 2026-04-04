@@ -13,7 +13,7 @@
             enable = true;
             virtualHosts.default = {
               default = true;
-              locations."/".return = ''200 {"message":"Hello from backend"}'';
+              locations."/".return = builtins.readFile ./backend-response.txt;
             };
           };
           networking.firewall.allowedTCPPorts = [ 80 ];
@@ -28,7 +28,7 @@
             enable = true;
             virtualHosts.default = {
               default = true;
-              locations."/".return = "200 " + builtins.readFile ./frontend.html;
+              locations."/".return = builtins.readFile ./frontend.html;
             };
           };
           networking.firewall.allowedTCPPorts = [ 80 ];
