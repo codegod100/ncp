@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ncp"
+version = "0.1.0"
+description = "Nix Container Platform CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "click>=8.0.0",
+    "requests>=2.28.0",
+]
+
+[project.scripts]
+ncp = "ncp.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ncp*"]
