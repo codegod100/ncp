@@ -8,10 +8,66 @@ import click
 import requests
 import json
 import sys
+import os
 from typing import Optional
+from pathlib import Path
 from urllib.parse import urljoin
 
 DEFAULT_API_URL = "https://nix.latha.org"
+
+
+def get_config_dir() -> Path:
+    """Get or create config directory"""
+    config_dir = Path.home() / ".config" / "ncp"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def get_config_path() -> Path:
+    """Get config file path"""
+    return get_config_dir() / "config.json"
+
+
+def load_config() -> dict:
+    """Load config from file"""
+    config_path = get_config_path()
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+
+def save_config(config: dict):
+    """Save config to file"""
+    config_path = get_config_path()
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    # Set restrictive permissions (only owner can read)
+    os.chmod(config_path, 0o600)
+
+
+def get_saved_token() -> Optional[str]:
+    """Get token from config file"""
+    config = load_config()
+    return config.get('token')
+
+
+def save_token(token: str, api_url: str = DEFAULT_API_URL):
+    """Save token to config file"""
+    config = load_config()
+    config['token'] = token
+    config['api_url'] = api_url
+    save_config(config)
+
+
+def clear_token():
+    """Remove saved token"""
+    config = load_config()
+    config.pop('token', None)
+    save_config(config)
 
 class NCPClient:
     """Client for the Nix-Fly API"""
@@ -109,6 +165,11 @@ def cli(ctx, api_url, token):
         info, logs, restart, destroy       # Container management
     """
     ctx.ensure_object(dict)
+    
+    # Load token from config file if not provided via env/cli
+    if not token:
+        token = get_saved_token()
+    
     ctx.obj['client'] = NCPClient(api_url, token)
 
 
@@ -290,10 +351,19 @@ def status(ctx):
             click.echo(f"✅ Auth Status: Authenticated")
             click.echo(f"📦 Containers: {len(containers)} found")
         except SystemExit:
-            click.echo(f"⚠️  Auth Status: Token invalid or expired")
+            # list_containers calls sys.exit(1) on error
+            click.echo(f"⚠️  Auth Status: Token exists but API request failed")
+            click.echo(f"   Check your connection or token may be expired")
     else:
         click.echo(f"❌ Auth Status: Not logged in")
         click.echo(f"   Run: ncp login")
+        
+        # Show config file location
+        config_path = get_config_path()
+        if config_path.exists():
+            click.echo(f"")
+            click.echo(f"   Config file: {config_path}")
+            click.echo(f"   (File exists but no valid token found)")
     
     click.echo()
 
@@ -329,6 +399,58 @@ def login(ctx, username, password):
                 click.echo("")
                 click.echo("💡 Or add to your shell profile:")
                 click.echo(f"   echo 'export NCP_TOKEN={token}' >> ~/.bashrc")
+            else:
+                click.echo("⚠️  Login succeeded but no token received")
+        elif response.status_code == 401:
+            click.echo("❌ Login failed: Invalid username or password")
+        else:
+            click.echo(f"❌ Login failed: {response.status_code}")
+            try:
+                error = response.json()
+                click.echo(f"   {error.get('detail', response.text)}")
+            except:
+                click.echo(f"   {response.text}")
+    except requests.exceptions.ConnectionError:
+        click.echo(f"❌ Cannot connect to {client.base_url}")
+        click.echo("   Check your internet connection and API URL")
+    except Exception as e:
+        click.echo(f"❌ Error: {e}")
+
+
+@cli.command()
+@click.option('--username', '-u', prompt=True, help='Your username')
+@click.option('--password', '-p', prompt=True, hide_input=True, help='Your password')
+@click.pass_context
+def login(ctx, username, password):
+    """Authenticate and get API token"""
+    client = ctx.obj['client']
+    
+    click.echo(f"\n🔐 Logging in to {client.base_url}...")
+    
+    try:
+        response = requests.post(
+            client._url('/api/v1/auth/login'),
+            json={"username": username, "password": password}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get('access_token')
+            
+            if token:
+                # Save token to config file
+                save_token(token, client.base_url)
+                
+                click.echo("✅ Login successful!")
+                click.echo("")
+                click.echo("🔑 Token saved to ~/.config/ncp/config.json")
+                click.echo("   (File permissions: 600 - only you can read it)")
+                click.echo("")
+                click.echo("📋 You can now use ncp without setting NCP_TOKEN:")
+                click.echo("   ncp status")
+                click.echo("   ncp list")
+                click.echo("")
+                click.echo("💡 To logout: rm ~/.config/ncp/config.json")
             else:
                 click.echo("⚠️  Login succeeded but no token received")
         elif response.status_code == 401:
