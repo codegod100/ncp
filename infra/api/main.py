@@ -55,7 +55,7 @@ def run_cmd(cmd: List[str], timeout: int = 30) -> Tuple[str, str, int]:
 
 def get_all_containers() -> List[str]:
     """Get list of all nixos containers."""
-    stdout, _, _ = run_cmd(["nixos-container", "list"])
+    stdout, _, _ = run_cmd(["nixos-container", "list"], timeout=5)
     return [name.strip() for name in stdout.strip().split('\n') if name.strip()]
 
 
