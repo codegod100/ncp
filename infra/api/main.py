@@ -234,28 +234,55 @@ def setup_port_forward(host_port: int, container_ip: str, container_port: int) -
     logger.info(f"[PORT-FWD] Setting up port forward: host:{host_port} -> {container_ip}:{container_port}")
     
     # Remove ALL existing rules for this port (cleanup duplicates)
+    # iptables -L --line-numbers output format:
+    # Chain PREROUTING (policy ACCEPT)
+    # num  target     prot opt source               destination
+    # 1    DNAT       tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:9002 to:10.100.0.5:80
     cleanup_count = 0
-    while True:
+    max_iterations = 50  # Safety limit to prevent infinite loops
+    
+    for _ in range(max_iterations):
         stdout, _, _ = run_cmd(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "--line-numbers"], 
                                description=f"list-rules-port-{host_port}")
-        found = False
-        if f"dpt:{host_port}" in stdout:
-            lines = stdout.strip().split('\n')
-            for i, line in enumerate(lines):
-                if f"dpt:{host_port}" in line:
-                    # Delete by line number (1-indexed in iptables)
-                    run_cmd(["iptables", "-t", "nat", "-D", "PREROUTING", str(i)], 
-                           timeout=10, description=f"del-rule-port-{host_port}-line-{i}")
-                    found = True
-                    cleanup_count += 1
-                    break
-        if not found:
-            break
+        
+        # Parse line numbers from output - skip first 2 header lines
+        lines = stdout.strip().split('\n')
+        rule_to_delete = None
+        
+        for line in lines[2:]:  # Skip "Chain PREROUTING..." and "num target..." headers
+            parts = line.split()
+            if len(parts) >= 4:
+                # parts[0] is the line number, parts[-2] is usually "dpt:PORT"
+                for part in parts:
+                    if part == f"dpt:{host_port}" or part.startswith(f"dpt:{host_port}"):
+                        # Found the rule - extract the actual iptables line number
+                        try:
+                            rule_to_delete = int(parts[0])
+                        except ValueError:
+                            pass
+                        break
+            if rule_to_delete:
+                break
+        
+        if not rule_to_delete:
+            break  # No more rules for this port
+        
+        # Delete by the actual iptables line number (1-indexed)
+        logger.debug(f"[PORT-FWD] Deleting rule at line {rule_to_delete} for port {host_port}")
+        _, stderr, rc = run_cmd(["iptables", "-t", "nat", "-D", "PREROUTING", str(rule_to_delete)], 
+                               timeout=10, description=f"del-rule-port-{host_port}-line-{rule_to_delete}")
+        
+        if rc != 0:
+            logger.warning(f"[PORT-FWD] Failed to delete rule {rule_to_delete}: {stderr}")
+            break  # Stop trying if delete fails
+        
+        cleanup_count += 1
     
     if cleanup_count > 0:
         logger.info(f"[PORT-FWD] Cleaned up {cleanup_count} existing rules for port {host_port}")
     
     # Add DNAT rule
+    logger.info(f"[PORT-FWD] Adding DNAT rule: {host_port} -> {container_ip}:{container_port}")
     _, _, rc = run_cmd([
         "iptables", "-t", "nat", "-A", "PREROUTING",
         "-p", "tcp", "--dport", str(host_port),
