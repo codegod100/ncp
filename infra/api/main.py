@@ -153,7 +153,16 @@ def generate_html_page(title: str, body_content: str) -> str:
         function updateAuthUI() {{
             const authDiv = document.getElementById('auth-section');
             if (token && authDiv) {{
-                authDiv.innerHTML = `<span>Logged in</span> <button class="btn" onclick="logout()">Logout</button>`;
+                // Fetch current user info
+                fetch(API_URL + '/auth/me', {{ headers: {{ 'Authorization': `Bearer ${{token}}` }} }})
+                    .then(r => r.json())
+                    .then(data => {{
+                        const username = data.username || 'unknown';
+                        authDiv.innerHTML = `<span>👤 ${{username}}</span> <button class="btn" onclick="logout()">Logout</button>`;
+                    }})
+                    .catch(() => {{
+                        authDiv.innerHTML = `<span>👤 Logged in</span> <button class="btn" onclick="logout()">Logout</button>`;
+                    }});
             }}
         }}
         

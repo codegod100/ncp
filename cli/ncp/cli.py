@@ -97,6 +97,12 @@ class NCPClient:
         self._handle_error(response)
         return response.json()
     
+    def get_me(self):
+        """Get current user info"""
+        response = self.session.get(self._url('/api/v1/auth/me'))
+        self._handle_error(response)
+        return response.json()
+    
     def get_container(self, name: str):
         """Get container details"""
         response = self.session.get(self._url(f'/api/v1/containers/{name}'))
@@ -439,8 +445,10 @@ def status(ctx):
         
         # Try to validate by making a request
         try:
+            user_info = client.get_me()
+            username = user_info.get('username', 'unknown')
+            click.echo(f"✅ Auth Status: Authenticated as {username}")
             containers = client.list_containers()
-            click.echo(f"✅ Auth Status: Authenticated")
             click.echo(f"📦 Containers: {len(containers)} found")
         except SystemExit:
             # list_containers calls sys.exit(1) on error
