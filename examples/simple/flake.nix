@@ -23,14 +23,12 @@
       frontend = {
         port = 9002;
         containerPort = 80;
-        config = { config, pkgs, lib, ... }: {
+        config = { config, pkgs, ... }: {
           services.nginx = {
             enable = true;
             virtualHosts.default = {
               default = true;
-              locations."/".extraConfig = ''
-                return 200 "Frontend - Hello!";
-              '';
+              locations."/".return = ''200 "<h1>Frontend</h1><p>Hello!</p>"'';
             };
           };
           networking.firewall.allowedTCPPorts = [ 80 ];
