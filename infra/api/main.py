@@ -205,9 +205,15 @@ async def root():
         for c in containers:
             status_class = "up" if c["status"] == "up" else "down"
             port_str = f":{c['port']}" if c["port"] != "-" else ""
+            # Create link if container has an exposed port
+            if c["port"] != "-":
+                service_url = f"http://204.168.220.202:{c['port']}"
+                name_html = f'<a href="{service_url}" target="_blank" style="text-decoration: none; color: #007acc;">{c["name"]}</a>'
+            else:
+                name_html = c['name']
             html += f"""
     <div class="container">
-        <h3>{c['name']}</h3>
+        <h3>{name_html}</h3>
         <span class="status {status_class}">{c['status']}</span>
         <p class="info">IP: {c['ip']}{port_str}</p>
     </div>
