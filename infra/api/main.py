@@ -144,7 +144,6 @@ def build_container_config(name: str, ip: str, user_config: str) -> str:
         cleaned_config = cleaned_config[1:end_pos].strip()
     
     return f'''
-  networking.useDHCP = false;
   networking.useHostResolvConf = false;
   
   networking.interfaces.eth0 = {{
