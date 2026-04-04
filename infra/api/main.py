@@ -385,6 +385,8 @@ async def deploy_project(
                 "--local-address", ip
             ], timeout=600)
             
+            print(f"DEBUG: nixos-container create rc={rc}, stderr={stderr[:200]}")
+            
             if rc != 0:
                 errors.append(f"{full_name}: creation failed - {stderr}")
                 continue
