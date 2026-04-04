@@ -208,7 +208,7 @@ def generate_html_page(title: str, body_content: str) -> str:
                     const portInfo = c.host_port ? ' (Port ' + c.host_port + ')' : '';
                     const owner = c.owner || 'unclaimed';
                     const nameDisplay = c.host_port 
-                        ? '<a href="http://204.168.220.202:' + c.host_port + '" target="_blank">' + c.name + '</a>'
+                        ? '<a href="http://nix.latha.org:' + c.host_port + '">' + c.name + '</a>'
                         : c.name;
                     html += '<div class="container"><strong>' + nameDisplay + '</strong> ' +
                            '<span class="status ' + statusClass + '">' + c.status + '</span> ' +
