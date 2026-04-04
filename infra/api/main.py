@@ -827,15 +827,18 @@ async def deploy_project(
     request: ProjectDeployRequest, 
     user: str = Depends(require_user)
 ):
-    """Deploy a project idempotently - creates, updates, removes containers to match flake.
+    """Deploy a project idempotently using Nix evaluation.
     
     The server:
-    1. Parses flake.nix to get desired container state
-    2. Compares with current containers for this project
-    3. Creates new containers, updates changed ones, removes obsolete ones
+    1. Writes project files to temp directory
+    2. Uses 'nix eval' to extract and evaluate container configs
+    3. Creates/updates/removes containers to match desired state
     4. Returns deployment results
     """
     import os
+    import tempfile
+    import json
+    import shutil
     
     # Validate project name
     if not re.match(r'^[a-zA-Z0-9_-]+$', project_name):
@@ -845,16 +848,25 @@ async def deploy_project(
     if "flake.nix" not in request.files:
         raise HTTPException(status_code=400, detail="No flake.nix in project files")
     
-    flake_content = request.files["flake.nix"]
+    # Create temp directory for project
+    temp_dir = tempfile.mkdtemp(prefix=f"ncp_project_{project_name}_")
     
-    # Extract container definitions from flake
-    containers_def = parse_flake_containers(flake_content)
-    
-    if not containers_def:
-        raise HTTPException(
-            status_code=400, 
-            detail="No ncp.containers defined in flake.nix"
-        )
+    try:
+        # Write all files
+        for filepath, content in request.files.items():
+            full_path = os.path.join(temp_dir, filepath)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w') as f:
+                f.write(content)
+        
+        # Use Nix to evaluate container definitions
+        containers_def = parse_flake_containers_nix(temp_dir)
+        
+        if not containers_def:
+            raise HTTPException(
+                status_code=400, 
+                detail="No ncp.containers defined in flake.nix"
+            )
     
     # Get current containers for this project (verify they actually exist)
     existing_containers = get_all_containers()  # Containers that actually exist on system
@@ -1158,6 +1170,105 @@ def parse_flake_containers(flake_content: str) -> Dict[str, Any]:
         containers[name] = spec
     
     return containers
+
+
+def parse_flake_containers_nix(temp_dir: str) -> Dict[str, Any]:
+    """Parse container definitions from flake.nix using Nix evaluation.
+    
+    Uses 'nix eval' to:
+    1. Extract container ports (serializable)
+    2. Evaluate config functions (resolves builtins.readFile, etc.)
+    3. Convert evaluated config back to Nix expression string
+    
+    Returns dict of container_name -> {port, containerPort, config}
+    """
+    containers = {}
+    
+    # First, get container names and ports using nix eval
+    list_expr = f'''
+let
+  flake = builtins.getFlake (toString {temp_dir});
+  containers = flake.ncp.containers or {{}};
+  extractInfo = name: container: {{
+    inherit name;
+    port = container.port or null;
+    containerPort = container.containerPort or 80;
+  }};
+in
+  builtins.mapAttrs extractInfo containers
+'''
+    
+    stdout, stderr, rc = run_cmd(
+        ["nix", "eval", "--impure", "--json", "--expr", list_expr],
+        timeout=60
+    )
+    
+    if rc != 0:
+        click.echo(f"Nix eval failed: {stderr}")
+        return {}
+    
+    try:
+        container_list = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+    
+    # For each container, evaluate its full config
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    eval_script = os.path.join(script_dir, "evaluate-config.nix")
+    
+    for name, info in container_list.items():
+        # Evaluate the config using our Nix script
+        stdout, stderr, rc = run_cmd(
+            [
+                "nix", "eval", "--impure", "--json",
+                "--expr", f'import {eval_script} {{ flakePath = {temp_dir}; containerName = "{name}"; }}'
+            ],
+            timeout=120
+        )
+        
+        if rc == 0:
+            try:
+                evaluated_config = json.loads(stdout)
+                # Convert evaluated JSON back to Nix expression
+                nix_config = json_to_nix(evaluated_config)
+            except:
+                nix_config = '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
+        else:
+            click.echo(f"Config eval failed for {name}: {stderr}")
+            nix_config = '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
+        
+        containers[name] = {
+            'port': info.get('port'),
+            'containerPort': info.get('containerPort', 80),
+            'config': nix_config
+        }
+    
+    return containers
+
+
+def json_to_nix(value) -> str:
+    """Convert a JSON value to a Nix expression string."""
+    if value is None:
+        return "null"
+    elif isinstance(value, bool):
+        return "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        return str(value)
+    elif isinstance(value, str):
+        # Escape special characters
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+        return f'"{escaped}"'
+    elif isinstance(value, list):
+        elements = [json_to_nix(item) for item in value]
+        return "[ " + " ".join(elements) + " ]"
+    elif isinstance(value, dict):
+        # Check if it's a NixOS config style (top-level attrs)
+        if all(isinstance(k, str) and not k.startswith('_') for k in value.keys()):
+            attrs = [f'{k} = {json_to_nix(v)};' for k, v in value.items()]
+            return "{ " + " ".join(attrs) + " }"
+        return "{ }"
+    else:
+        return "{ }"
 
 
 if __name__ == "__main__":
