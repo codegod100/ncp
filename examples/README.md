@@ -1,233 +1,91 @@
-# NCP Container Examples
+# NCP Examples
 
-Example NixOS container configurations for the ncp (Nix Container Platform).
+Example projects showing how to use NCP (Nix Container Platform).
+
+## Project Structure
+
+```
+examples/
+├── myapp/          # Full-stack app with flake-parts
+│   ├── flake.nix   # Defines backend + frontend containers
+│   └── README.md
+│
+└── simple/         # Simple standalone .nix files
+    ├── backend-api.nix
+    ├── frontend-app.nix
+    └── README.md
+```
 
 ## Quick Start
 
-1. **Check status:**
+### Modern Flake-Based Approach (Recommended)
+
+The `myapp/` example shows the modern approach using Nix flakes and flake-parts:
+
 ```bash
-ncp status
+cd examples/myapp
+
+# View what's defined
+nix flake show
+
+# Deploy all containers
+ncp deploy --flake
+
+# Or deploy individually
+ncp deploy --flake .#backend
+ncp deploy --flake .#frontend
 ```
 
-2. **Login:**
+Benefits:
+- **Type-safe**: Uses `lib.mkOption` for config validation
+- **Composable**: Share configs between projects
+- **Reproducible**: flake.lock pins all dependencies
+- **Single source of truth**: Backend + frontend in one file
+
+### Simple Standalone Files
+
+The `simple/` folder contains standalone `.nix` files:
+
 ```bash
+cd examples/simple
+
+# Deploy using ncp CLI
+ncp deploy backend-api
+ncp deploy frontend-app
+```
+
+Good for:
+- Quick testing
+- Learning NixOS containers
+- Simple single-container deployments
+
+## Choosing an Approach
+
+| Approach | Best For | Complexity |
+|----------|----------|------------|
+| **Flake-based** | Production apps, multi-container projects | Medium |
+| **Simple .nix** | Learning, quick tests, single containers | Low |
+
+## Common Workflow
+
+```bash
+# 1. Login (one time)
 ncp login
-# Enter your username and password
-```
 
-3. **Verify login:**
-```bash
+# 2. Deploy
+ncp deploy myapp          # simple approach
+# or
+ncp deploy --flake        # flake approach
+
+# 3. Check status
 ncp status
-# Should show: ✅ Auth Status: Authenticated
-```
-
-4. **Deploy an example:**
-```bash
-ncp deploy --name my-backend --port 9001 --config backend-api.nix
-```
-
-## Examples
-
-### Simple Backend + Frontend Pair
-
-**Files:** `backend-api.nix`, `frontend-app.nix`
-
-A minimal example showing cross-container communication.
-
-**Deploy:**
-```bash
-# Deploy backend
-ncp deploy --name my-backend --port 9001 --config backend-api.nix
-
-# Edit frontend-app.nix to set your backend URL, then:
-ncp deploy --name my-frontend --port 9002 --config frontend-app.nix
-```
-
-**Access:**
-- Backend: `http://YOUR_HOST:9001/` → JSON API with CORS
-- Frontend: `http://YOUR_HOST:9002/` → HTML with "Fetch from Backend" button
-
-**One-liner for both:**
-```bash
-export NCP_TOKEN=$(ncp token)  # or login first
-./deploy-pair.sh
-```
-
----
-
-### Todo App (Full-Stack)
-
-**Files:** `todo-api.nix`, `todo-frontend.nix`
-
-A more polished example with a styled todo interface.
-
-**Features:**
-- Backend: REST API with `/todos`, `/health` endpoints
-- Frontend: Modern UI with gradient, styled list, interactive
-- Demonstrates proper CORS for PUT/POST methods
-
-**Deploy:**
-```bash
-# 1. Edit todo-frontend.nix: Set backendUrl to your backend IP:port
-# 2. Deploy both
-ncp deploy --name todo-api --port 9003 --config todo-api.nix
-ncp deploy --name todo-app --port 9004 --config todo-frontend.nix
-```
-
----
-
-### Individual Components
-
-#### backend-api.nix
-Simple JSON API server with CORS headers.
-
-**What it does:**
-- Nginx serving JSON
-- `Access-Control-Allow-Origin: *` (allows any frontend to fetch)
-- Response: `{"message": "Hello from backend", "service": "api", "version": "1.0"}`
-
-#### frontend-app.nix
-Generic frontend that can fetch from any backend.
-
-**What it does:**
-- Creates HTML file via activation script
-- JavaScript `fetch()` to call backend
-- Two buttons: "Fetch from Backend" and "Clear"
-- Displays JSON response formatted
-
-**To customize:** Edit the `backendUrl` variable in the .nix file
-
----
-
-## How It Works
-
-### Networking Between Containers
-
-```
-┌─────────────────┐      ┌─────────────────┐
-│   Frontend      │      │    Backend      │
-│   (10.100.1.2)  │──────│   (10.100.1.1)  │
-│                 │      │                 │
-│  JavaScript     │fetch │  JSON API       │
-│  fetch()        │──────│  + CORS         │
-│                 │      │                 │
-└─────────────────┘      └─────────────────┘
-         │                        │
-         └──────────┬───────────┘
-                    │
-              Host (nix.latha.org)
-              proxy_arp enabled
-              Port forwarding via iptables
-```
-
-**Two ways containers communicate:**
-
-1. **External (through host):**
-   - `http://204.168.220.202:9101/`
-   - Goes through host's port forwarding (iptables DNAT)
-   - Works from browser (cross-origin)
-   - **Requires CORS headers on backend**
-
-2. **Internal (container-to-container):**
-   - `http://10.100.1.1:80/`
-   - Direct routing via container subnet (10.100.0.0/16)
-   - Host has `proxy_arp` enabled for routing
-   - **Doesn't require CORS** (same-origin in browser context)
-
-### Key NixOS Patterns Used
-
-| Pattern | Example | Purpose |
-|---------|---------|---------|
-| `services.nginx.enable` | All examples | Web server |
-| `system.activationScripts` | `frontend-app.nix` | Create files at boot |
-| `pkgs.writeText` | `todo-frontend.nix` | Generate config files |
-| `networking.firewall` | All examples | Open port 80 |
-| CORS headers | `backend-api.nix` | Cross-origin requests |
-
-## Deployment Methods
-
-### Option 1: ncp CLI (Recommended)
-```bash
-# Login first
-ncp login
-# Enter your username and password when prompted
-
-# Check status
-ncp status
-
-# Deploy
-ncp deploy --name my-container --port 9001 --config backend-api.nix
-
-# List your containers
 ncp list
 
-# Destroy
-ncp destroy my-container
+# 4. View logs
+ncp logs myapp-backend
+
+# 5. Cleanup
+ncp destroy myapp-backend
 ```
 
-### Option 2: Bash quick deploy (`deploy-pair.sh`)
-```bash
-# Set your token first
-export NCP_TOKEN=your_token_here
-
-# Deploy both backend and frontend
-./deploy-pair.sh
-```
-
-### Option 3: Manual curl with JSON
-```bash
-# Get token via API
-curl -X POST https://nix.latha.org/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"user","password":"pass"}'
-
-# Then deploy via curl
-curl -X POST https://nix.latha.org/api/v1/containers \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d @backend-api.json
-```
-
-## ncp CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `ncp status` | Show auth status and server connection |
-| `ncp login` | Authenticate interactively (prompts for user/pass) |
-| `ncp deploy --name X --port Y --config FILE.nix` | Deploy container |
-| `ncp list` | List your containers |
-| `ncp info NAME` | Show container details |
-| `ncp logs NAME [-f]` | Show/stream container logs |
-| `ncp restart NAME` | Restart a container |
-| `ncp destroy NAME` | Destroy a container |
-| `ncp version` | Show version info |
-| `ncp destroy NAME` | Remove container |
-| `ncp logs NAME` | View container logs |
-
-## Troubleshooting
-
-**CORS errors in browser:**
-- Backend needs: `add_header Access-Control-Allow-Origin * always;`
-- Check backend headers: `curl -I http://HOST:PORT/`
-
-**Can't fetch from backend:**
-- Verify backend is running: `curl http://HOST:PORT/`
-- Check frontend's `backendUrl` matches actual backend
-- Ensure `proxy_arp` is enabled on host
-
-**Container won't start:**
-- Check config syntax: `nix-instantiate --eval myconfig.nix`
-- Check firewall port is open: `networking.firewall.allowedTCPPorts = [ 80 ];`
-- View logs: `ncp logs my-container`
-
-**ncp CLI not found:**
-- Install from repo: `cd /path/to/ncp && pip install -e cli/`
-- Or use nix develop: `nix develop --command ncp --help`
-
-## More Examples Coming
-
-- [ ] postgres.nix - PostgreSQL database
-- [ ] redis.nix - Redis cache
-- [ ] nodejs-app.nix - Node.js + npm app
-- [ ] python-api.nix - Python Flask/FastAPI
-- [ ] static-site.nix - Hugo/Jekyll generated site
+See individual project READMEs for details.

@@ -212,8 +212,6 @@ def info(ctx, name):
     click.echo()
 
 
-NCP_MODULE_PREFIX = '''{ config, pkgs, lib, ... }:
-
 let
   cfg = config.ncp;
 in
@@ -251,16 +249,19 @@ NCP_MODULE_SUFFIX = ''';
 def parse_nix_config(filepath: str) -> dict:
     """Parse a .nix file for ncp metadata and config.
     
-    Uses lib.mkOption pattern - extracts ncp.port, ncp.name from a proper
-    NixOS module that defines these options.
+    Extracts ncp metadata from comments like:
+    # ncp.port = 9001
+    # ncp.name = "myapp"
+    
+    The metadata comments are stripped and not sent to the API.
     
     Returns dict with:
-    - nix_config: the wrapped Nix expression (with NCP module included)
-    - host_port: extracted from ncp.port, or None
-    - container_name: extracted from ncp.name, or None
+    - nix_config: the Nix expression (with metadata comments stripped)
+    - host_port: extracted from ncp.port comment, or None
+    - container_name: extracted from ncp.name comment, or None
     """
     with open(filepath, 'r') as f:
-        user_config = f.read()
+        lines = f.readlines()
     
     result = {
         'nix_config': '',
@@ -270,29 +271,30 @@ def parse_nix_config(filepath: str) -> dict:
     
     import re
     
-    # Extract ncp metadata from user's config
-    # Look for ncp.port = XXXX (with or without lib.mkDefault)
-    port_match = re.search(r'ncp\.port\s*=\s*(?:lib\.)?mk(?:Default|Force)?\s+(\d+)', user_config)
-    if not port_match:
-        port_match = re.search(r'ncp\.port\s*=\s*(\d+)', user_config)
-    if port_match:
-        result['host_port'] = int(port_match.group(1))
+    config_lines = []
+    for line in lines:
+        stripped = line.strip()
+        
+        # Check for ncp metadata comments: # ncp.port = 9001 or # ncp.name = "xxx"
+        if stripped.startswith('#') and 'ncp.' in stripped:
+            # Try to extract port: # ncp.port = 9001
+            port_match = re.search(r'#\s*ncp\.port\s*=\s*(\d+)', stripped)
+            if port_match:
+                result['host_port'] = int(port_match.group(1))
+            
+            # Try to extract name: # ncp.name = "myapp" or # ncp.name = 'myapp'
+            name_match = re.search(r'#\s*ncp\.name\s*=\s*"([^"]+)"', stripped)
+            if not name_match:
+                name_match = re.search(r"#\s*ncp\.name\s*=\s*'([^']+)'", stripped)
+            if name_match:
+                result['container_name'] = name_match.group(1)
+            
+            # Skip this line (don't include in config)
+            continue
+        
+        config_lines.append(line)
     
-    # Look for ncp.name = "XXXX" or ncp.name = XXXX
-    name_match = re.search(r'ncp\.name\s*=\s*(?:lib\.)?mk(?:Default|Force)?\s*"([^"]+)"', user_config)
-    if not name_match:
-        name_match = re.search(r"ncp\.name\s*=\s*(?:lib\.)?mk(?:Default|Force)?\s*'([^']+)'", user_config)
-    if not name_match:
-        name_match = re.search(r'ncp\.name\s*=\s*"([^"]+)"', user_config)
-    if not name_match:
-        name_match = re.search(r"ncp\.name\s*=\s*'([^']+)'", user_config)
-    if name_match:
-        result['container_name'] = name_match.group(1)
-    
-    # Wrap the user's config with our NCP module
-    # This allows the ncp.* options to be valid NixOS options
-    result['nix_config'] = NCP_MODULE_PREFIX + user_config + NCP_MODULE_SUFFIX
-    
+    result['nix_config'] = ''.join(config_lines)
     return result
 
 
