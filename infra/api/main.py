@@ -162,9 +162,12 @@ in
         with open(nix_file, 'w') as f:
             f.write(nix_expr)
         
-        # Build it
+        # Build it with explicit nixpkgs from the system
+        # Use -I to set nixpkgs path
+        nixpkgs_path = "/nix/var/nix/profiles/per-user/root/channels/nixos" if os.path.exists("/nix/var/nix/profiles/per-user/root/channels/nixos") else "nixpkgs"
+        
         stdout, stderr, rc = run_cmd(
-            ["nix-build", nix_file, "-o", os.path.join(tmpdir, "result")],
+            ["nix-build", nix_file, "-o", os.path.join(tmpdir, "result"), "-I", f"nixpkgs={nixpkgs_path}"],
             timeout=600,
             cwd=tmpdir
         )
