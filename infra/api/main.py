@@ -126,32 +126,35 @@ def build_container_nix(name: str, ip: str, user_config: str, host_port: Optiona
             cleaned_config = cleaned_config[1:-1].strip()
         
         # Build a complete nixos system for the container
+        # Wrap user config in a module so pkgs/lib are available
         nix_expr = f'''
 let
   nixpkgs = import <nixpkgs> {{}};
 in
-(nixpkgs.nixos {{
-  boot.isContainer = true;
-  
-  networking.useDHCP = false;
-  networking.useHostResolvConf = false;
-  
-  networking.interfaces.eth0 = {{
-    ipv4.addresses = [{{
-      address = "{ip}";
-      prefixLength = 16;
-    }}];
-  }};
-  networking.defaultGateway = "{NETWORK_CONFIG['gateway']}";
-  networking.nameservers = [ "8.8.8.8" "1.1.1.1" ];
-  
-  services.openssh.enable = true;
-  users.users.root.initialPassword = "root";
-  
-  {cleaned_config}
-  
-  system.stateVersion = "24.11";
-}}).config.system.build.toplevel
+(nixpkgs.nixos (
+  {{ config, pkgs, lib, ... }}: {{
+    boot.isContainer = true;
+    
+    networking.useDHCP = false;
+    networking.useHostResolvConf = false;
+    
+    networking.interfaces.eth0 = {{
+      ipv4.addresses = [{{
+        address = "{ip}";
+        prefixLength = 16;
+      }}];
+    }};
+    networking.defaultGateway = "{NETWORK_CONFIG['gateway']}";
+    networking.nameservers = [ "8.8.8.8" "1.1.1.1" ];
+    
+    services.openssh.enable = true;
+    users.users.root.initialPassword = "root";
+    
+    {cleaned_config}
+    
+    system.stateVersion = "24.11";
+  }}
+)).config.system.build.toplevel
 '''
         
         # Write the nix expression
