@@ -193,30 +193,11 @@ def create_container_imperative(name: str, system_path: str, ip: str) -> bool:
     if name in get_all_containers():
         return False
     
-    # Create container directory structure
-    container_root = f"/var/lib/containers/{name}"
-    os.makedirs(container_root, exist_ok=True)
-    
-    # Copy the built system to container root
-    stdout, stderr, rc = run_cmd([
-        "rsync", "-a", "--delete",
-        f"{system_path}/",
-        f"{container_root}/"
-    ], timeout=120)
-    
-    if rc != 0:
-        # Try cp -r if rsync fails
-        run_cmd(["rm", "-rf", container_root])
-        stdout, stderr, rc = run_cmd([
-            "cp", "-r", f"{system_path}/.", container_root
-        ], timeout=120)
-        if rc != 0:
-            raise Exception(f"Failed to copy system: {stderr}")
-    
-    # Create the container using nixos-container with our built system
+    # Create the container using nixos-container with the built system
+    # system_path is already a Nix store path
     stdout, stderr, rc = run_cmd([
         "nixos-container", "create", name,
-        "--system-path", container_root,
+        "--system-path", system_path,
         "--auto-start",
         "--host-address", NETWORK_CONFIG["gateway"],
         "--local-address", ip
