@@ -112,6 +112,18 @@ class NCPClient:
         self._handle_error(response)
         return response.json()
     
+    def deploy_project(self, project_name: str, files: dict):
+        """Deploy a project (directory of files) to the server.
+        
+        Server handles all Nix parsing and container creation.
+        """
+        response = self.session.post(
+            self._url(f'/api/v1/projects/{project_name}/deploy'),
+            json={'files': files}
+        )
+        self._handle_error(response)
+        return response.json()
+    
     def restart_container(self, name: str):
         """Restart a container"""
         response = self.session.post(
@@ -212,86 +224,100 @@ def info(ctx, name):
     click.echo()
 
 
-def parse_nix_config(filepath: str) -> dict:
-    """Parse a .nix file for ncp metadata and config.
+def read_project_files(project_dir: str) -> dict:
+    """Read all files in a project directory for sending to server.
     
-    Extracts ncp metadata from comments like:
-    # ncp.port = 9001
-    # ncp.name = "myapp"
-    
-    The metadata comments are stripped and not sent to the API.
-    
-    Returns dict with:
-    - nix_config: the Nix expression (with metadata comments stripped)
-    - host_port: extracted from ncp.port comment, or None
-    - container_name: extracted from ncp.name comment, or None
+    Returns dict mapping filenames to their contents.
     """
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
+    files = {}
+    import os
     
-    result = {
-        'nix_config': '',
-        'host_port': None,
-        'container_name': None
-    }
-    
-    import re
-    
-    config_lines = []
-    for line in lines:
-        stripped = line.strip()
+    for root, dirs, filenames in os.walk(project_dir):
+        # Skip .git and common ignore directories
+        dirs[:] = [d for d in dirs if d not in ['.git', '.venv', 'node_modules', '__pycache__']]
         
-        # Check for ncp metadata comments: # ncp.port = 9001 or # ncp.name = "xxx"
-        if stripped.startswith('#') and 'ncp.' in stripped:
-            # Try to extract port: # ncp.port = 9001
-            port_match = re.search(r'#\s*ncp\.port\s*=\s*(\d+)', stripped)
-            if port_match:
-                result['host_port'] = int(port_match.group(1))
+        for filename in filenames:
+            # Skip common non-config files
+            if filename.endswith(('.lock', '.log', '.tmp', '.swp', '.swo', '~')):
+                continue
             
-            # Try to extract name: # ncp.name = "myapp" or # ncp.name = 'myapp'
-            name_match = re.search(r'#\s*ncp\.name\s*=\s*"([^"]+)"', stripped)
-            if not name_match:
-                name_match = re.search(r"#\s*ncp\.name\s*=\s*'([^']+)'", stripped)
-            if name_match:
-                result['container_name'] = name_match.group(1)
+            filepath = os.path.join(root, filename)
+            relpath = os.path.relpath(filepath, project_dir)
             
-            # Skip this line (don't include in config)
-            continue
-        
-        config_lines.append(line)
+            try:
+                with open(filepath, 'r') as f:
+                    files[relpath] = f.read()
+            except (UnicodeDecodeError, IOError):
+                # Skip binary files or unreadable files
+                pass
     
-    result['nix_config'] = ''.join(config_lines)
-    return result
+    return files
 
 
 @cli.command(name='deploy')
-@click.argument('service')
-@click.option('--config', '-c', help='Path to .nix config file (default: {service}.nix)')
+@click.argument('project')
 @click.pass_context
-def deploy(ctx, service, config):
-    """Deploy a container from a Nix config file.
+def deploy(ctx, project):
+    """Deploy a project to NCP.
     
-    Usage: ncp deploy SERVICE
+    Reads the project directory and sends it to the server for deployment.
+    The server handles all Nix parsing and container creation.
     
-    Looks for {SERVICE}.nix by default, or use --config to specify path.
-    Port must be specified in the .nix file with: # ncp: port=XXXX
+    Usage: ncp deploy PROJECT
     
     Example:
-        ncp deploy myapp          # Uses myapp.nix
-        ncp deploy myapp -c ./configs/web.nix
+        ncp deploy myapp     # Deploys myapp/ directory
+        ncp deploy simple    # Deploys simple/ directory
     """
     client = ctx.obj['client']
     
-    # Determine config file path
-    if config:
-        config_path = config
-    else:
-        config_path = f"{service}.nix"
+    # Check if project directory exists
+    if not os.path.isdir(project):
+        click.echo(f"❌ Project directory not found: {project}/", err=True)
+        click.echo(f"   Expected a directory named '{project}' in current directory", err=True)
+        sys.exit(1)
     
-    # Check if file exists
-    if not os.path.exists(config_path):
-        click.echo(f"❌ Config file not found: {config_path}", err=True)
-        click.echo(f"   Expected {service}.nix in current directory", err=True)
+    # Check for flake.nix
+    flake_path = os.path.join(project, "flake.nix")
+    if not os.path.exists(flake_path):
+        click.echo(f"❌ No flake.nix found in {project}/", err=True)
+        click.echo(f"   Projects must have a flake.nix file defining containers", err=True)
+        sys.exit(1)
+    
+    click.echo(f"🚀 Deploying project '{project}'...")
+    click.echo(f"   Reading project files from {project}/")
+    
+    # Read all project files
+    try:
+        files = read_project_files(project)
+    except Exception as e:
+        click.echo(f"❌ Failed to read project: {e}", err=True)
+        sys.exit(1)
+    
+    click.echo(f"   📁 {len(files)} files to deploy")
+    click.echo(f"   ⏳ Sending to server for build...")
+    
+    # Send to server
+    try:
+        result = client.deploy_project(project, files)
+        
+        click.echo(f"✅ Project deployed!")
+        
+        # Show deployed containers
+        if 'containers' in result:
+            click.echo(f"\n📦 Deployed containers:")
+            for container in result['containers']:
+                name = container.get('name', 'unknown')
+                port = container.get('host_port', 'unknown')
+                status = container.get('status', 'unknown')
+                click.echo(f"   • {name} (port {port}) - {status}")
+        
+        if 'message' in result:
+            click.echo(f"\n{result['message']}")
+            
+    except SystemExit:
+        click.echo("❌ Deployment failed", err=True)
+        sys.exit(1)
         click.echo(f"   Or specify path: ncp deploy {service} -c /path/to/config.nix", err=True)
         sys.exit(1)
     

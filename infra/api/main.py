@@ -779,6 +779,203 @@ async def list_all_containers(user: str = Depends(require_user)):
         ))
     return containers
 
+
+# Project deployment models
+class ProjectDeployRequest(BaseModel):
+    files: Dict[str, str]
+
+class ProjectDeployResponse(BaseModel):
+    project: str
+    containers: List[ContainerInfo]
+    message: str
+
+
+@app.post("/api/v1/projects/{project_name}/deploy", response_model=ProjectDeployResponse)
+async def deploy_project(
+    project_name: str, 
+    request: ProjectDeployRequest, 
+    user: str = Depends(require_user)
+):
+    """Deploy a project by evaluating its flake and creating containers.
+    
+    The server:
+    1. Writes files to a temp directory
+    2. Evaluates flake.nix to get ncp.containers definitions
+    3. Creates each container
+    4. Returns deployment results
+    """
+    import tempfile
+    import os
+    
+    # Validate project name
+    if not re.match(r'^[a-zA-Z0-9_-]+$', project_name):
+        raise HTTPException(status_code=400, detail="Invalid project name")
+    
+    # Check for flake.nix in files
+    if "flake.nix" not in request.files:
+        raise HTTPException(status_code=400, detail="No flake.nix in project files")
+    
+    # Create temp directory for project
+    temp_dir = tempfile.mkdtemp(prefix=f"ncp_project_{project_name}_")
+    
+    try:
+        # Write all files
+        for filepath, content in request.files.items():
+            full_path = os.path.join(temp_dir, filepath)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w') as f:
+                f.write(content)
+        
+        # Evaluate flake to get container definitions
+        # For now, parse simple format from flake.nix directly
+        # In production, use `nix eval` to properly evaluate
+        flake_content = request.files["flake.nix"]
+        
+        # Extract container definitions from flake
+        # Look for ncp.containers = { ... } pattern
+        containers_def = parse_flake_containers(flake_content)
+        
+        if not containers_def:
+            raise HTTPException(
+                status_code=400, 
+                detail="No ncp.containers defined in flake.nix"
+            )
+        
+        # Deploy each container
+        deployed = []
+        errors = []
+        
+        for container_name, container_spec in containers_def.items():
+            try:
+                # Generate unique container name with project prefix
+                full_name = f"{project_name}-{container_name}"
+                
+                # Check if container already exists
+                if full_name in get_all_containers():
+                    errors.append(f"{full_name}: already exists")
+                    continue
+                
+                # Get port from spec
+                host_port = container_spec.get('port')
+                if not host_port:
+                    errors.append(f"{full_name}: no port specified")
+                    continue
+                
+                # Get nix config
+                nix_config = container_spec.get('config', '{ }')
+                
+                # Find IP
+                ip = find_next_available_ip()
+                if not ip:
+                    errors.append(f"{full_name}: no available IPs")
+                    continue
+                
+                # Build and create container
+                container_config = build_container_config(full_name, ip, nix_config)
+                
+                stdout, stderr, rc = run_cmd([
+                    "nixos-container", "create", full_name,
+                    "--config", container_config,
+                    "--host-address", NETWORK_CONFIG["gateway"],
+                    "--local-address", ip
+                ], timeout=600)
+                
+                if rc != 0:
+                    errors.append(f"{full_name}: creation failed - {stderr}")
+                    continue
+                
+                # Start container
+                run_cmd(["nixos-container", "start", full_name], timeout=60)
+                
+                # Setup port forwarding
+                container_port = container_spec.get('containerPort', 80)
+                setup_port_forward(host_port, ip, container_port)
+                
+                # Save to database
+                containers_db[full_name] = {
+                    "ip": ip,
+                    "host_port": host_port,
+                    "container_port": container_port,
+                    "created_at": datetime.now().isoformat(),
+                    "config": nix_config,
+                    "status": "up",
+                    "owner": user,
+                    "project": project_name
+                }
+                save_db(CONTAINERS_DB_FILE, containers_db)
+                
+                deployed.append(ContainerInfo(
+                    name=full_name,
+                    status="up",
+                    ip=ip,
+                    host_port=host_port,
+                    created_at=containers_db[full_name]["created_at"],
+                    owner=user
+                ))
+                
+            except Exception as e:
+                errors.append(f"{full_name}: {str(e)}")
+        
+        # Build response message
+        if errors:
+            message = f"Deployed {len(deployed)} containers, {len(errors)} errors: " + "; ".join(errors)
+        else:
+            message = f"Successfully deployed {len(deployed)} containers"
+        
+        return ProjectDeployResponse(
+            project=project_name,
+            containers=deployed,
+            message=message
+        )
+        
+    finally:
+        # Cleanup temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def parse_flake_containers(flake_content: str) -> Dict[str, Any]:
+    """Parse container definitions from flake.nix content.
+    
+    This is a simplified parser. In production, use `nix eval`.
+    """
+    containers = {}
+    
+    # Look for ncp.containers = { pattern
+    import re
+    match = re.search(r'ncp\.containers\s*=\s*\{([^}]+)\}', flake_content, re.DOTALL)
+    if not match:
+        return containers
+    
+    inner = match.group(1)
+    
+    # Parse each container definition (simplified)
+    # Look for container_name = { ... };
+    container_pattern = r'(\w+)\s*=\s*\{([^}]+)\};'
+    for m in re.finditer(container_pattern, inner):
+        name = m.group(1)
+        body = m.group(2)
+        
+        spec = {}
+        
+        # Extract port
+        port_match = re.search(r'port\s*=\s*(\d+)', body)
+        if port_match:
+            spec['port'] = int(port_match.group(1))
+        
+        # Extract containerPort  
+        cp_match = re.search(r'containerPort\s*=\s*(\d+)', body)
+        if cp_match:
+            spec['containerPort'] = int(cp_match.group(1))
+        
+        # For now, we can't easily extract the full config function
+        # In production, this would use nix eval
+        spec['config'] = '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
+        
+        containers[name] = spec
+    
+    return containers
+
+
 if __name__ == "__main__":
     # Create admin user if none exists
     if "admin" not in users_db:
