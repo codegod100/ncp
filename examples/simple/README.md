@@ -1,70 +1,73 @@
-# Simple NCP Examples
+# Simple NCP Example
 
-Standalone `.nix` files for quick container deployment.
+A minimal NCP project showing flake-based container deployment.
 
-## Files
+## Structure
 
-| File | Purpose | Port |
-|------|---------|------|
-| `backend-api.nix` | JSON API with CORS | 9001 |
-| `frontend-app.nix` | Frontend that calls backend | 9002 |
-| `todo-api.nix` | REST API with multiple endpoints | 9003 |
-| `todo-frontend.nix` | Styled todo UI | 9004 |
+```
+simple/
+├── flake.nix      # Defines backend + frontend containers
+└── README.md      # This file
+```
 
-## Usage
-
-### 1. Login
+## Deploy
 
 ```bash
+# Login to NCP
 ncp login
-# Enter username and password
+
+# Deploy the entire project
+ncp deploy simple
 ```
 
-### 2. Deploy a container
+This deploys both containers defined in `flake.nix`:
+- `simple-backend` (port 9001)
+- `simple-frontend` (port 9002)
+
+## Test
 
 ```bash
-# Deploy by service name (looks for {name}.nix)
-ncp deploy backend-api
-ncp deploy frontend-app
-```
-
-The CLI reads `ncp.port` and `ncp.name` from comments in the file:
-
-```nix
-# ncp.port = 9001;
-# ncp.name = "backend-api";
-```
-
-### 3. Test
-
-```bash
-# Backend returns JSON
+# Backend API
 curl http://204.168.220.202:9001/
 
-# Frontend shows HTML with "Fetch from Backend" button
+# Frontend (open in browser)
 open http://204.168.220.202:9002/
-```
-
-### 4. Cleanup
-
-```bash
-ncp destroy backend-api
-ncp destroy frontend-app
-```
-
-## Deploy Script
-
-Use `deploy-pair.sh` to deploy both:
-
-```bash
-./deploy-pair.sh
 ```
 
 ## How It Works
 
-1. **Service name** → `backend-api` looks for `backend-api.nix`
-2. **Port** → Read from `# ncp.port = 9001;` comment
-3. **Name** → Read from `# ncp.name = "backend-api";` comment
-4. **Config** → Everything else sent to API
+1. **flake.nix** defines containers in `ncp.containers`
+2. **CLI** sends the entire project to server
+3. **Server** evaluates flake and creates containers
+4. **Containers** get names like `simple-backend`, `simple-frontend`
 
-The metadata comments are stripped before sending to the server.
+## Flake Structure
+
+```nix
+{
+  ncp.containers = {
+    backend = {
+      port = 9001;           # External port
+      containerPort = 80;    # Internal port (default: 80)
+      config = { ... }: {    # NixOS configuration
+        services.nginx.enable = true;
+        # ...
+      };
+    };
+    
+    frontend = {
+      port = 9002;
+      config = { ... }: {
+        # ... frontend config
+      };
+    };
+  };
+}
+```
+
+## Cleanup
+
+```bash
+ncp destroy simple-backend
+ncp destroy simple-frontend
+```
