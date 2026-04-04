@@ -128,6 +128,11 @@ in {
       8000    # NCP API (internal)
     ];
     
+    # Allow dynamic container ports (9000-9100 range)
+    allowedTCPPortRanges = [ 
+      { from = 9000; to = 9100; }
+    ];
+    
     extraCommands = ''
       # Enable IP forwarding
       echo 1 > /proc/sys/net/ipv4/ip_forward
