@@ -82,12 +82,12 @@ in {
     
     extraConfig = ''
       nix.latha.org {
-        # NCP API at /api/* - API calls only
-        handle_path /api/* {
+        # API calls at /api/* - proxy with path intact
+        handle /api/* {
           reverse_proxy localhost:8000
         }
         
-        # Root path / - HTML frontend from API
+        # Root path / - HTML frontend
         handle / {
           reverse_proxy localhost:8000
         }
@@ -103,8 +103,8 @@ in {
       }
       
       :80 {
-        # NCP API at /api/*
-        handle_path /api/* {
+        # API calls at /api/*
+        handle /api/* {
           reverse_proxy localhost:8000
         }
         
