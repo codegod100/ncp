@@ -165,11 +165,69 @@ def build_container_config(name: str, ip: str, user_config: str) -> str:
 
 @app.get("/")
 async def root():
-    return {
-        "service": "ncp-api",
-        "version": "2.1.0",
-        "description": "Dynamic NixOS container deployment",
-    }
+    """Serve HTML page with container list"""
+    containers = []
+    for name in get_all_containers():
+        status = get_container_status(name)
+        info = containers_db.get(name, {})
+        containers.append({
+            "name": name,
+            "status": status,
+            "ip": info.get("ip", "-"),
+            "port": info.get("host_port", "-"),
+        })
+    
+    html = """<!DOCTYPE html>
+<html>
+<head>
+    <title>NCP - Nix Container Platform</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f5f5f5; }
+        h1 { color: #333; border-bottom: 3px solid #007acc; padding-bottom: 10px; }
+        .container { background: white; border-radius: 8px; padding: 20px; margin: 10px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .container h3 { margin-top: 0; color: #007acc; }
+        .status { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
+        .up { background: #d4edda; color: #155724; }
+        .down { background: #f8d7da; color: #721c24; }
+        .info { color: #666; font-size: 0.9em; }
+        .empty { text-align: center; color: #666; padding: 40px; }
+        .endpoint { background: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 30px; }
+        code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
+        pre { background: #f4f4f4; padding: 15px; overflow-x: auto; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>🚀 NCP - Nix Container Platform</h1>
+    <p>Dynamic NixOS container deployment on nix.latha.org</p>
+"""
+    
+    if containers:
+        for c in containers:
+            status_class = "up" if c["status"] == "up" else "down"
+            port_str = f":{c['port']}" if c["port"] != "-" else ""
+            html += f"""
+    <div class="container">
+        <h3>{c['name']}</h3>
+        <span class="status {status_class}">{c['status']}</span>
+        <p class="info">IP: {c['ip']}{port_str}</p>
+    </div>
+"""
+    else:
+        html += '<div class="empty"><p>No containers running</p><p>Deploy one with: <code>ncp deploy-demo</code></p></div>'
+    
+    html += """
+    <div class="endpoint">
+        <h3>API Endpoints</h3>
+        <pre>GET  /api/v1/containers       - List containers
+POST /api/v1/containers       - Create container
+GET  /api/v1/containers/{name} - Container details
+POST /api/v1/containers/{name}/restart - Restart
+DELETE /api/v1/containers/{name} - Destroy</pre>
+    </div>
+</body>
+</html>"""
+    
+    return HTMLResponse(content=html)
 
 @app.get("/api/v1/containers", response_model=List[ContainerInfo])
 async def list_containers():
