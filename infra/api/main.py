@@ -73,14 +73,20 @@ def get_container_ip(name: str) -> Optional[str]:
 
 def setup_port_forward(host_port: int, container_ip: str, container_port: int) -> bool:
     """Setup iptables DNAT rule."""
-    # Remove existing rule if present
-    stdout, _, _ = run_cmd(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "--line-numbers"])
-    if f"dpt:{host_port}" in stdout:
-        lines = stdout.strip().split('\n')
-        for i, line in enumerate(lines):
-            if f"dpt:{host_port}" in line:
-                run_cmd(["iptables", "-t", "nat", "-D", "PREROUTING", str(i)], timeout=10)
-                break
+    # Remove ALL existing rules for this port (cleanup duplicates)
+    while True:
+        stdout, _, _ = run_cmd(["iptables", "-t", "nat", "-L", "PREROUTING", "-n", "--line-numbers"])
+        found = False
+        if f"dpt:{host_port}" in stdout:
+            lines = stdout.strip().split('\n')
+            for i, line in enumerate(lines):
+                if f"dpt:{host_port}" in line:
+                    # Delete by line number (1-indexed in iptables)
+                    run_cmd(["iptables", "-t", "nat", "-D", "PREROUTING", str(i)], timeout=10)
+                    found = True
+                    break
+        if not found:
+            break
     
     # Add DNAT rule
     _, _, rc = run_cmd([
