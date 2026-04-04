@@ -33,7 +33,15 @@
           propagatedBuildInputs = with pkgs.python3Packages; [ click requests ];
         };
 
-        # Dev shell uses uv for Python dep management
+        # Expose ncp package explicitly
+        packages.ncp = self.packages.${system}.default;
+
+        # App for nix run
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/ncp";
+        };
+        apps.ncp = self.apps.${system}.default;
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             uv
