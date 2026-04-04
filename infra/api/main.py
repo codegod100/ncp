@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse, HTMLResponse, PlainTextResponse
 import uvicorn
 from datetime import datetime
 
-app = FastAPI(title="Nix-Fly API", version="2.0.0")
+app = FastAPI(title="NCP API", version="2.0.0")
 
 # Container specification model
 class ContainerSpec(BaseModel):
@@ -264,7 +264,7 @@ async def root():
     return {
         "service": "nix-fly-api",
         "version": "2.0.0",
-        "description": "Dynamic Fly.io-style container deployment for NixOS (no rebuilds!)",
+        "description": "Dynamic NixOS container deployment via NCP (no rebuilds!)",
         "endpoints": {
             "GET /api/v1/containers": "List all containers",
             "POST /api/v1/containers": "Create and start container immediately (dynamic)",
