@@ -192,86 +192,73 @@ def generate_html_page(title: str, body_content: str) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def root_page(request: Request):
-    """Serve HTML frontend listing containers."""
-    user = optional_user(request)
-    
-    # Get containers
-    all_containers = get_all_containers()
-    visible_containers = []
-    
-    for name in all_containers:
-        info = db.containers_db.get(name, {})
-        owner = info.get("owner")
-        
-        # Show if: unowned, or current user owns it, or user is admin
-        if not owner or owner == user or (user and db.users_db.get(user, {}).get("is_admin")):
-            status = get_container_status(name)
-            visible_containers.append({
-                "name": name,
-                "status": status,
-                "ip": info.get("ip"),
-                "host_port": info.get("host_port"),
-                "owner": owner or "unclaimed",
-                "project": info.get("project") or "default"
-            })
-    
-    # Group containers by project
-    from collections import defaultdict
-    by_project = defaultdict(list)
-    for c in visible_containers:
-        by_project[c["project"]].append(c)
-    
-    # Build container list HTML grouped by project
-    containers_html = ""
-    if visible_containers:
-        for project in sorted(by_project.keys()):
-            containers = by_project[project]
-            containers_html += f'<div class="project"><h2>📁 {project}</h2>'
-            for c in containers:
-                status_class = "up" if c["status"] == "up" else "down"
-                port_info = f" (Port {c['host_port']})" if c["host_port"] else ""
-                
-                # Make service name a clickable link if port is known
-                name_display = c["name"]
-                if c["host_port"]:
-                    name_display = f'<a href="http://204.168.220.202:{c["host_port"]}" target="_blank">{c["name"]}</a>'
-                
-                containers_html += f'''
-                <div class="container">
-                    <strong>{name_display}</strong> 
-                    <span class="status {status_class}">{c["status"]}</span>
-                    <span style="color: #666; margin-left: 1rem;">{c["owner"]}{port_info}</span>
-                </div>'''
-            containers_html += '</div>'
-    else:
-        containers_html = "<p>No containers found.</p>"
-    
-    body = f'''
+    """Serve HTML frontend - containers loaded dynamically via JS."""
+    body = '''
     <h1>NCP Containers</h1>
     <div class="auth-bar" id="auth-section">
         <input type="text" id="username" placeholder="Username">
         <input type="password" id="password" placeholder="Password">
         <button class="btn" onclick="login()">Login</button>
     </div>
-    {containers_html}
+    <div id="containers-list"><p>Loading containers...</p></div>
     <script>
-        async function login() {{
+        async function login() {
             const u = document.getElementById('username').value;
             const p = document.getElementById('password').value;
-            const resp = await fetch(API_URL + '/auth/login', {{
+            const resp = await fetch(API_URL + '/auth/login', {
                 method: 'POST',
-                headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{username: u, password: p}})
-            }});
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: u, password: p})
+            });
             const data = await resp.json();
-            if (data.access_token) {{
+            if (data.access_token) {
                 localStorage.setItem('ncp_token', data.access_token);
                 window.location.reload();
-            }} else {{
+            } else {
                 alert('Login failed: ' + (data.detail || 'Unknown error'));
-            }}
-        }}
+            }
+        }
+        
+        async function loadContainers() {
+            const data = await api('GET', '/containers');
+            const listDiv = document.getElementById('containers-list');
+            if (!data || data.length === 0) {
+                listDiv.innerHTML = '<p>No containers found.</p>';
+                return;
+            }
+            
+            // Group by project
+            const byProject = {};
+            data.forEach(c => {
+                const proj = c.project || 'default';
+                if (!byProject[proj]) byProject[proj] = [];
+                byProject[proj].push(c);
+            });
+            
+            let html = '';
+            Object.keys(byProject).sort().forEach(proj => {
+                html += '<div class="project"><h2>📁 ' + proj + '</h2>';
+                byProject[proj].forEach(c => {
+                    const statusClass = c.status === 'up' ? 'up' : 'down';
+                    const portInfo = c.host_port ? ' (Port ' + c.host_port + ')' : '';
+                    const owner = c.owner || 'unclaimed';
+                    const nameDisplay = c.host_port 
+                        ? '<a href="http://204.168.220.202:' + c.host_port + '" target="_blank">' + c.name + '</a>'
+                        : c.name;
+                    html += '<div class="container"><strong>' + nameDisplay + '</strong> ' +
+                           '<span class="status ' + statusClass + '">' + c.status + '</span> ' +
+                           '<span style="color: #666; margin-left: 1rem;">' + owner + portInfo + '</span></div>';
+                });
+                html += '</div>';
+            });
+            listDiv.innerHTML = html;
+        }
+        
+        loadContainers();
     </script>
+    '''
+    
+    return HTMLResponse(content=generate_html_page("Containers", body))
     '''
     
     return HTMLResponse(content=generate_html_page("Containers", body))
@@ -300,7 +287,8 @@ async def list_containers(user: Optional[str] = Depends(optional_user)):
             ip=info.get("ip"),
             host_port=info.get("host_port"),
             created_at=info.get("created_at"),
-            owner=owner or "unclaimed"
+            owner=owner or "unclaimed",
+            project=info.get("project")
         ))
     
     return result

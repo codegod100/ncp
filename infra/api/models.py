@@ -12,6 +12,7 @@ class ContainerInfo(BaseModel):
     host_port: Optional[int] = None
     created_at: Optional[str] = None
     owner: Optional[str] = "unclaimed"
+    project: Optional[str] = None
 
 
 class ContainerCreateRequest(BaseModel):
