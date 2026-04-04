@@ -61,6 +61,10 @@ in {
     
     path = with pkgs; [ nixos-container iptables bash coreutils nix ];
     
+    environment = {
+      NIX_PATH = "nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos";
+    };
+    
     serviceConfig = {
       Type = "simple";
       ExecStart = "${pkgs.python3.withPackages (ps: with ps; [ fastapi uvicorn pydantic ])}/bin/python3 /home/nixos/code/ncp/infra/api/main.py";
