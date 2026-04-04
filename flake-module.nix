@@ -1,28 +1,11 @@
 # NCP Flake Module
 # 
-# This module can be imported into your flake to define NCP containers
-# using the flake-parts module system.
+# This module defines the ncp.containers option for use in flake-parts or standard flakes.
 
 { lib, config, ... }:
 
 let
   cfg = config.ncp;
-  
-  # Generate a NixOS configuration for each container
-  mkNixosConfig = name: containerDef: { config, pkgs, lib, ... }: {
-    # Base container settings
-    boot.isContainer = true;
-    networking.useDHCP = false;
-    networking.firewall.enable = true;
-    
-    # Container-specific config
-    networking.hostName = lib.mkDefault name;
-    
-    # Apply user's config
-    imports = [
-      (containerDef.config { inherit config pkgs lib; })
-    ];
-  };
 in
 {
   options.ncp = {
@@ -51,13 +34,5 @@ in
     };
   };
 
-  config = lib.mkIf (cfg.containers != {}) {
-    # Export as nixosConfigurations for nixos-container --flake
-    nixosConfigurations = lib.mapAttrs (name: containerDef:
-      lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [ (mkNixosConfig name containerDef) ];
-      }
-    ) cfg.containers;
-  };
+  config = {};
 }

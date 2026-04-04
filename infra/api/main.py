@@ -227,18 +227,22 @@ async def create_container(
     
     # Build config
     nix_config = req.config or '{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }'
-    container_config = build_container_config(full_name, ip, nix_config)
+    config_file = build_container_config(full_name, nix_config)
     
-    # Create container
-    stdout, stderr, rc = run_cmd([
-        "nixos-container", "create", full_name,
-        "--config", container_config,
-        "--host-address", "10.100.0.1",
-        "--local-address", ip
-    ], timeout=600)
-    
-    if rc != 0:
-        raise HTTPException(500, f"Creation failed: {stderr}")
+    try:
+        # Create container
+        stdout, stderr, rc = run_cmd([
+            "nixos-container", "create", full_name,
+            "--config-file", config_file,
+            "--host-address", "10.100.0.1",
+            "--local-address", ip
+        ], timeout=600)
+        
+        if rc != 0:
+            raise HTTPException(500, f"Creation failed: {stderr}")
+    finally:
+        import os
+        os.unlink(config_file)
     
     # Start and setup port forward
     run_cmd(["nixos-container", "start", full_name], timeout=60)
@@ -325,7 +329,6 @@ async def deploy_project(
         
         # Evaluate with Nix
         containers_def = parse_flake_containers_nix(temp_dir)
-        print(f"DEBUG deploy: containers_def = {containers_def}")
         if not containers_def:
             raise HTTPException(400, "No ncp.containers defined in flake.nix")
         
@@ -364,7 +367,6 @@ async def deploy_project(
             spec = containers_def[name]
             host_port = spec.get('port')
             
-            print(f"DEBUG: Creating {full_name}, spec={spec}, host_port={host_port}")
             
             if not host_port:
                 errors.append(f"{full_name}: no port specified")
@@ -376,22 +378,22 @@ async def deploy_project(
                 continue
             
             nix_config = spec.get('config', '{ }')
-            container_config = build_container_config(full_name, ip, nix_config)
+            config_file = build_container_config(full_name, nix_config)
             
-            stdout, stderr, rc = run_cmd([
-                "nixos-container", "create", full_name,
-                "--config", container_config,
-                "--host-address", "10.100.0.1",
-                "--local-address", ip
-            ], timeout=600)
-            
-            print(f"DEBUG: rc={rc}")
-            print(f"DEBUG: stdout={stdout[:500]}")
-            print(f"DEBUG: stderr={stderr[:500]}")
-            
-            if rc != 0:
-                errors.append(f"{full_name}: creation failed - {stdout} {stderr}")
-                continue
+            try:
+                stdout, stderr, rc = run_cmd([
+                    "nixos-container", "create", full_name,
+                    "--config-file", config_file,
+                    "--host-address", "10.100.0.1",
+                    "--local-address", ip
+                ], timeout=600)
+                
+                if rc != 0:
+                    errors.append(f"{full_name}: creation failed - {stderr}")
+                    continue
+            finally:
+                import os
+                os.unlink(config_file)
             
             run_cmd(["nixos-container", "start", full_name], timeout=60)
             container_port = spec.get('containerPort', 80)
