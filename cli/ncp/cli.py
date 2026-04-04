@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ncp - Nix Container Platform CLI
-A CLI tool for deploying and managing NixOS containers via the Nix-Fly API
+A CLI tool for deploying and managing NixOS containers dynamically
 """
 
 import click
@@ -48,7 +48,7 @@ class NCPClient:
         return response.json()
     
     def create_container(self, spec: dict):
-        """Create/deploy a new container"""
+        """Create/deploy a new container (starts immediately)"""
         response = self.session.post(
             self._url('/api/v1/containers'),
             json=spec
@@ -65,7 +65,7 @@ class NCPClient:
         return response.json()
     
     def destroy_container(self, name: str):
-        """Destroy a container"""
+        """Destroy a container immediately"""
         response = self.session.delete(
             self._url(f'/api/v1/containers/{name}')
         )
@@ -82,18 +82,6 @@ class NCPClient:
         )
         self._handle_error(response)
         return response
-    
-    def list_pending(self):
-        """List pending/staged containers"""
-        response = self.session.get(self._url('/api/v1/pending'))
-        self._handle_error(response)
-        return response.json()
-    
-    def apply_changes(self):
-        """Apply all pending changes"""
-        response = self.session.post(self._url('/api/v1/apply'))
-        self._handle_error(response)
-        return response.json()
 
 
 @click.group()
@@ -105,17 +93,16 @@ class NCPClient:
 def cli(ctx, api_url, token):
     """ncp - Nix Container Platform CLI
     
-    Deploy and manage NixOS containers on the Nix-Fly platform.
+    Deploy and manage NixOS containers dynamically.
     
-    Workflow:
-        ncp deploy-demo --name my-app    # Stage a new container
-        ncp pending                       # Check pending changes
-        ncp apply                         # Build and activate
+    Workflow (Dynamic Mode):
+        ncp deploy-demo --name my-app    # Deploy and start immediately!
         ncp list                          # View running containers
+        ncp logs my-app -f                # Stream logs
+        ncp destroy my-app                # Destroy immediately
     
     Commands:
-        list, pending, apply              # Container lifecycle
-        deploy-demo, demo                 # Quick deployments  
+        list, deploy, deploy-demo         # Container lifecycle
         info, logs, restart, destroy      # Container management
     """
     ctx.ensure_object(dict)
@@ -146,66 +133,6 @@ def list(ctx):
 
 
 @cli.command()
-@click.pass_context
-def pending(ctx):
-    """List staged/pending containers waiting for 'apply'"""
-    client = ctx.obj['client']
-    pending = client.list_pending()
-    
-    if not pending.get('pending'):
-        click.echo("No pending changes. All containers are active.")
-        return
-    
-    click.echo(f"\n{'NAME':<20} {'ACTION':<10} {'CONFIG FILE'}")
-    click.echo("-" * 70)
-    
-    for p in pending['pending']:
-        name = p['name']
-        action = p.get('action', 'unknown')
-        config = p.get('config_file', 'N/A')
-        click.echo(f"{name:<20} {action:<10} {config}")
-    
-    click.echo(f"\n⚠️  Run 'ncp apply' to activate these changes")
-    click.echo()
-
-
-@cli.command()
-@click.option('--yes', '-y', is_flag=True, help='Skip confirmation')
-@click.pass_context
-def apply(ctx, yes):
-    """Apply pending changes on the remote server"""
-    client = ctx.obj['client']
-    
-    # Check if there are pending changes
-    pending = client.list_pending()
-    if not pending.get('pending'):
-        click.echo("✅ No pending changes to apply.")
-        return
-    
-    names = [p['name'] for p in pending['pending']]
-    click.echo(f"🔄 Requesting apply for: {', '.join(names)}")
-    click.echo("   The server will run nixos-rebuild switch (may take a few minutes)")
-    
-    if not yes:
-        if not click.confirm("   Continue?"):
-            click.echo("Aborted.")
-            return
-    
-    click.echo("\n⏳ Rebuilding NixOS configuration...")
-    try:
-        result = client.apply_changes()
-        click.echo(f"✅ Applied {len(result.get('applied', []))} changes")
-        click.echo(f"\n📦 Active containers:")
-        for c in result.get('containers', []):
-            status = "🟢" if c['status'] == 'up' else "🔴"
-            click.echo(f"   {status} {c['name']:<20} ({c['status']})")
-    except SystemExit:
-        click.echo("❌ Apply failed", err=True)
-        sys.exit(1)
-    click.echo()
-
-
-@cli.command()
 @click.argument('name')
 @click.pass_context
 def info(ctx, name):
@@ -221,18 +148,22 @@ def info(ctx, name):
     click.echo()
 
 
-@cli.command(name='deploy-demo')
-@click.option('--name', default='demo-web', help='Container name')
-@click.option('--port', default=8082, help='External port to expose')
-@click.option('--auto-start', is_flag=True, default=True, help='Start container after creation')
+@cli.command(name='deploy')
+@click.option('--name', required=True, help='Container name')
+@click.option('--port', default=8080, help='External port to expose')
+@click.option('--config', '-c', help='Nix config file to use')
 @click.pass_context
-def deploy_demo(ctx, name, port, auto_start):
-    """Deploy a demo nginx container"""
+def deploy(ctx, name, port, config):
+    """Deploy a container from a Nix config file"""
     client = ctx.obj['client']
     
-    # Demo nginx container configuration
-    nix_config = '''{ config, pkgs, lib, ... }: {
-  # Simple nginx web server
+    # Read config file
+    if config:
+        with open(config, 'r') as f:
+            nix_config = f.read()
+    else:
+        # Default nginx config
+        nix_config = '''{
   services.nginx = {
     enable = true;
     virtualHosts.default = {
@@ -243,37 +174,40 @@ def deploy_demo(ctx, name, port, auto_start):
       };
     };
   };
-  
-  # Open firewall for nginx
   networking.firewall.allowedTCPPorts = [ 80 ];
-  
-  system.stateVersion = "24.11";
 }'''
     
     spec = {
         "name": name,
-        "description": "Demo nginx web server deployed via ncp CLI",
+        "description": f"Container {name} deployed via ncp CLI",
         "nix_config": nix_config,
         "host_port": port,
         "container_port": 80,
-        "auto_start": auto_start
+        "auto_start": True
     }
     
     click.echo(f"🚀 Deploying container '{name}'...")
     click.echo(f"   Port mapping: {port} → 80 (container)")
-    click.echo(f"   ⚠️  This creates a staged config. Run 'ncp apply' to activate.")
+    click.echo(f"   ⏳ Building and starting (this may take a minute)...")
     
     try:
         result = client.create_container(spec)
-        click.echo(f"✅ Container staged successfully!")
+        click.echo(f"✅ Container deployed and running!")
         click.echo(f"   Status: {result['status']}")
         click.echo(f"   IP: {result.get('ip') or 'auto-assigned'}")
-        click.echo(f"\n⚡ Next steps:")
-        click.echo(f"   1. Run 'ncp apply' to build and activate the container")
-        click.echo(f"   2. Access your app at: http://204.168.220.202:{port}")
+        click.echo(f"   Access: http://204.168.220.202:{port}")
     except SystemExit:
         click.echo("❌ Deployment failed", err=True)
         sys.exit(1)
+
+
+@cli.command(name='deploy-demo')
+@click.option('--name', default='demo-web', help='Container name')
+@click.option('--port', default=8082, help='External port to expose')
+@click.pass_context
+def deploy_demo(ctx, name, port):
+    """Deploy a demo nginx container"""
+    ctx.invoke(deploy, name=name, port=port, config=None)
 
 
 @cli.command()
@@ -293,20 +227,17 @@ def restart(ctx, name):
 @click.option('--force', is_flag=True, help='Skip confirmation')
 @click.pass_context
 def destroy(ctx, name, force):
-    """Mark a container for destruction (use 'apply' to complete)"""
+    """Destroy a container immediately"""
     client = ctx.obj['client']
     
     if not force:
-        if not click.confirm(f"⚠️  Mark '{name}' for destruction?"):
+        if not click.confirm(f"⚠️  Destroy '{name}' immediately?"):
             click.echo("Aborted.")
             return
     
-    click.echo(f"🗑️  Marking '{name}' for destruction...")
+    click.echo(f"🗑️  Destroying '{name}'...")
     result = client.destroy_container(name)
-    click.echo(f"✅ {result.get('note', 'Container marked')}")
-    
-    if 'apply' in result.get('note', '').lower():
-        click.echo(f"⚡ Run 'ncp apply' to complete the destruction")
+    click.echo(f"✅ {result.get('action', 'Container destroyed')}")
 
 
 @cli.command()
@@ -335,8 +266,8 @@ def logs(ctx, name, follow, lines):
 @cli.command()
 def version():
     """Show ncp version"""
-    click.echo("ncp (Nix Container Platform) v0.1.0")
-    click.echo("CLI for deploying NixOS containers on Nix-Fly")
+    click.echo("ncp (Nix Container Platform) v0.2.0")
+    click.echo("Dynamic container CLI - no rebuilds needed!")
 
 
 # Quick aliases

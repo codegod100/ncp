@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Nix-Fly Container Management API
-Fly.io-style container deployment for NixOS
+Nix-Fly Container Management API - Dynamic Edition
+Imperative container creation without nixos-rebuild
 """
 
 import subprocess
 import json
 import os
 import re
+import tempfile
+import shutil
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -15,7 +17,7 @@ from fastapi.responses import StreamingResponse, HTMLResponse, PlainTextResponse
 import uvicorn
 from datetime import datetime
 
-app = FastAPI(title="Nix-Fly API", version="1.0.0")
+app = FastAPI(title="Nix-Fly API", version="2.0.0")
 
 # Container specification model
 class ContainerSpec(BaseModel):
@@ -38,6 +40,12 @@ class ContainerInfo(BaseModel):
 DATA_DIR = "/var/lib/nix-fly"
 CONTAINERS_DB_FILE = f"{DATA_DIR}/containers.json"
 
+# Network configuration
+NETWORK_CONFIG = {
+    "subnet": "10.100.0.0/16",
+    "gateway": "10.100.0.1",
+}
+
 def load_db() -> Dict[str, Any]:
     """Load containers database from disk"""
     if os.path.exists(CONTAINERS_DB_FILE):
@@ -57,7 +65,7 @@ def save_db(db: Dict[str, Any]):
 # In-memory state (loaded from disk)
 containers_db: Dict[str, Any] = load_db()
 
-def run_cmd(cmd: List[str], capture=True, timeout=60, cwd: Optional[str] = None) -> tuple:
+def run_cmd(cmd: List[str], capture=True, timeout=300, cwd: Optional[str] = None) -> tuple:
     """Run shell command and return (stdout, stderr, returncode)"""
     try:
         if capture:
@@ -93,114 +101,177 @@ def find_next_available_ip() -> Optional[str]:
     # Get IPs from running containers
     containers = get_all_containers()
     for name in containers:
-        # Try to get IP from container status
-        stdout, _, rc = run_cmd(["nixos-container", "run", name, "--", "hostname", "-I"])
-        if rc == 0:
-            ips = stdout.strip().split()
-            for ip in ips:
-                if ip.startswith("10.100."):
-                    used_ips.add(ip)
-                    break
+        info = containers_db.get(name, {})
+        if info.get("ip"):
+            used_ips.add(info["ip"])
     
-    # Also check our database
-    for c in containers_db.values():
-        if c.get("ip"):
-            used_ips.add(c["ip"])
-    
-    # Find available IP in 10.100.10.x range
-    for i in range(10, 250):
-        candidate = f"10.100.10.{i}"
-        if candidate not in used_ips:
-            return candidate
-    
+    # Find next available in range 10.100.1.x - 10.100.254.x
+    for third in range(1, 255):
+        for fourth in range(1, 255):
+            ip = f"10.100.{third}.{fourth}"
+            if ip not in used_ips:
+                return ip
     return None
 
-def write_container_nix(name: str, ip: str, nix_config: str, host_port: Optional[int], container_port: int) -> str:
-    """Write container configuration to /etc/nix-fly/containers/{name}.nix"""
-    config_dir = "/etc/nix-fly/containers"
-    os.makedirs(config_dir, exist_ok=True)
+def build_container_nix(name: str, ip: str, user_config: str, host_port: Optional[int], container_port: int) -> str:
+    """Build a complete NixOS container expression and return the built system path"""
     
-    config_file = f"{config_dir}/{name}.nix"
+    # Create temporary directory for the build
+    tmpdir = tempfile.mkdtemp(prefix=f"nix-fly-{name}-")
     
-    # Strip the leading '{ config, pkgs, lib, ... }:' from nix_config if present
-    # to avoid duplication since we wrap it ourselves
-    cleaned_config = nix_config.strip()
-    if cleaned_config.startswith('{'):
-        # Find the matching closing brace for the args
-        # Pattern: { config, pkgs, lib, ... }: or { ... }:
-        match = re.match(r'\s*\{[^}]*\}\s*:\s*(.*)', cleaned_config, re.DOTALL)
-        if match:
-            cleaned_config = match.group(1).strip()
-    
-    # Create proper NixOS container config
-    config_content = f'''{{ config, pkgs, lib, ... }}:
-
-{{
-  # Container: {name}
-  containers.{name} = {{
-    autoStart = true;
-    ephemeral = false;
-    privateNetwork = true;
-    hostAddress = "10.100.0.1";
-    localAddress = "{ip}";
-    
-    config = {{ config, pkgs, lib, ... }}: {cleaned_config};
+    try:
+        # Clean up the user config - extract from braces if wrapped
+        cleaned_config = user_config.strip()
+        if cleaned_config.startswith('{') and cleaned_config.endswith('}'):
+            cleaned_config = cleaned_config[1:-1].strip()
+        
+        # Build a complete nixos system for the container
+        nix_expr = f'''
+let
+  nixpkgs = import <nixpkgs> {{}};
+in
+(nixpkgs.nixos {{
+  boot.isContainer = true;
+  
+  networking.useDHCP = false;
+  networking.useHostResolvConf = false;
+  
+  networking.interfaces.eth0 = {{
+    ipv4.addresses = [{{
+      address = "{ip}";
+      prefixLength = 16;
+    }}];
   }};
+  networking.defaultGateway = "{NETWORK_CONFIG['gateway']}";
+  networking.nameservers = [ "8.8.8.8" "1.1.1.1" ];
+  
+  services.openssh.enable = true;
+  users.users.root.initialPassword = "root";
+  
+  {cleaned_config}
+  
+  system.stateVersion = "24.11";
+}}).config.system.build.toplevel
 '''
-    
-    if host_port:
-        config_content += f'''  
-  # Port forwarding firewall rules
-  networking.firewall.extraCommands = ''
-    iptables -t nat -A PREROUTING -p tcp --dport {host_port} -j DNAT --to-destination {ip}:{container_port}
-    iptables -t nat -A POSTROUTING -p tcp --dport {container_port} -d {ip} -j MASQUERADE
-  '';
-'''
-    
-    config_content += '''}
-'''
-    
-    with open(config_file, 'w') as f:
-        f.write(config_content)
-    
-    return config_file
+        
+        # Write the nix expression
+        nix_file = os.path.join(tmpdir, "container.nix")
+        with open(nix_file, 'w') as f:
+            f.write(nix_expr)
+        
+        # Build it
+        stdout, stderr, rc = run_cmd(
+            ["nix-build", nix_file, "-o", os.path.join(tmpdir, "result")],
+            timeout=600,
+            cwd=tmpdir
+        )
+        
+        if rc != 0:
+            raise Exception(f"Build failed: {stderr}")
+        
+        result_path = os.path.join(tmpdir, "result")
+        if not os.path.exists(result_path):
+            raise Exception("Build completed but result not found")
+        
+        # Return the real path (resolve symlink)
+        return os.path.realpath(result_path)
+        
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise e
 
-def generate_imports_nix():
-    """Regenerate /etc/nix-fly/containers/imports.nix with all containers"""
-    config_dir = "/etc/nix-fly/containers"
-    os.makedirs(config_dir, exist_ok=True)
+def create_container_imperative(name: str, system_path: str, ip: str) -> bool:
+    """Create container imperatively using nixos-container with built system"""
     
-    # Find all .nix files except imports.nix
-    configs = []
-    if os.path.exists(config_dir):
-        for f in os.listdir(config_dir):
-            if f.endswith('.nix') and f != 'imports.nix':
-                configs.append(f"./{f}")
+    # Check if container already exists
+    if name in get_all_containers():
+        return False
     
-    imports_content = "# Auto-generated container imports\n[\n"
-    for c in configs:
-        imports_content += f"  {c}\n"
-    imports_content += "]\n"
+    # Create container directory structure
+    container_root = f"/var/lib/containers/{name}"
+    os.makedirs(container_root, exist_ok=True)
     
-    with open(f"{config_dir}/imports.nix", 'w') as f:
-        f.write(imports_content)
+    # Copy the built system to container root
+    stdout, stderr, rc = run_cmd([
+        "rsync", "-a", "--delete",
+        f"{system_path}/",
+        f"{container_root}/"
+    ], timeout=120)
+    
+    if rc != 0:
+        # Try cp -r if rsync fails
+        run_cmd(["rm", "-rf", container_root])
+        stdout, stderr, rc = run_cmd([
+            "cp", "-r", f"{system_path}/.", container_root
+        ], timeout=120)
+        if rc != 0:
+            raise Exception(f"Failed to copy system: {stderr}")
+    
+    # Create the container using nixos-container
+    stdout, stderr, rc = run_cmd([
+        "nixos-container", "create", name,
+        "--ensure-running" if True else "",
+        "--host-address", NETWORK_CONFIG["gateway"],
+        "--local-address", ip
+    ])
+    
+    if rc != 0:
+        raise Exception(f"Container creation failed: {stderr}")
+    
+    return True
+
+def setup_port_forward(name: str, host_port: int, container_ip: str, container_port: int):
+    """Setup iptables port forwarding"""
+    # Add PREROUTING rule
+    stdout, stderr, rc = run_cmd([
+        "iptables", "-t", "nat", "-A", "PREROUTING",
+        "-p", "tcp", "--dport", str(host_port),
+        "-j", "DNAT", "--to-destination", f"{container_ip}:{container_port}"
+    ])
+    if rc != 0:
+        print(f"Warning: Failed to add PREROUTING rule: {stderr}")
+    
+    # Add POSTROUTING rule
+    stdout, stderr, rc = run_cmd([
+        "iptables", "-t", "nat", "-A", "POSTROUTING",
+        "-p", "tcp", "--dport", str(container_port),
+        "-d", container_ip,
+        "-j", "MASQUERADE"
+    ])
+    if rc != 0:
+        print(f"Warning: Failed to add POSTROUTING rule: {stderr}")
+
+def remove_port_forward(host_port: int, container_ip: str, container_port: int):
+    """Remove iptables port forwarding"""
+    # Remove PREROUTING rule
+    run_cmd([
+        "iptables", "-t", "nat", "-D", "PREROUTING",
+        "-p", "tcp", "--dport", str(host_port),
+        "-j", "DNAT", "--to-destination", f"{container_ip}:{container_port}"
+    ])
+    
+    # Remove POSTROUTING rule
+    run_cmd([
+        "iptables", "-t", "nat", "-D", "POSTROUTING",
+        "-p", "tcp", "--dport", str(container_port),
+        "-d", container_ip,
+        "-j", "MASQUERADE"
+    ])
 
 @app.get("/")
 async def root():
     """API root with documentation"""
     return {
         "service": "nix-fly-api",
-        "version": "1.0.0",
-        "description": "Fly.io-style container deployment for NixOS",
+        "version": "2.0.0",
+        "description": "Dynamic Fly.io-style container deployment for NixOS (no rebuilds!)",
         "endpoints": {
             "GET /api/v1/containers": "List all containers",
-            "POST /api/v1/containers": "Create/deploy new container (writes config, requires rebuild)",
+            "POST /api/v1/containers": "Create and start container immediately (dynamic)",
             "GET /api/v1/containers/{name}": "Get container details",
             "POST /api/v1/containers/{name}/restart": "Restart container",
-            "DELETE /api/v1/containers/{name}": "Destroy container (writes config, requires rebuild)",
+            "DELETE /api/v1/containers/{name}": "Destroy container immediately (dynamic)",
             "GET /api/v1/containers/{name}/logs": "Stream container logs",
-            "POST /api/v1/apply": "Apply pending container changes (rebuild NixOS)",
-            "GET /api/v1/pending": "List pending container changes",
         }
     }
 
@@ -225,7 +296,7 @@ async def list_containers():
 
 @app.post("/api/v1/containers", response_model=ContainerInfo)
 async def create_container(spec: ContainerSpec):
-    """Stage a new container (writes config, requires 'apply' to activate)"""
+    """Create and start a container immediately (no apply needed!)"""
     
     # Validate name
     if not re.match(r'^[a-zA-Z0-9_-]+$', spec.name):
@@ -244,111 +315,63 @@ async def create_container(spec: ContainerSpec):
         raise HTTPException(status_code=500, detail="No available IPs in range")
     
     try:
-        # Write container config
-        config_file = write_container_nix(
-            spec.name, 
-            spec.ip, 
+        # Build the container system
+        print(f"Building container {spec.name}...")
+        system_path = build_container_nix(
+            spec.name,
+            spec.ip,
             spec.nix_config,
             spec.host_port,
             spec.container_port
         )
         
-        # Regenerate imports
-        generate_imports_nix()
+        # Create the container imperatively
+        print(f"Creating container {spec.name}...")
+        create_container_imperative(spec.name, system_path, spec.ip)
         
-        # Store metadata (mark as pending)
+        # Setup port forwarding if requested
+        if spec.host_port:
+            print(f"Setting up port forward {spec.host_port} -> {spec.ip}:{spec.container_port}")
+            setup_port_forward(spec.name, spec.host_port, spec.ip, spec.container_port)
+        
+        # Store metadata
         containers_db[spec.name] = {
             "ip": spec.ip,
             "host_port": spec.host_port,
             "container_port": spec.container_port,
             "created_at": datetime.now().isoformat(),
             "config": spec.nix_config,
-            "config_file": config_file,
-            "status": "pending"
+            "system_path": system_path,
+            "status": "up"
         }
         save_db(containers_db)
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {str(e)}")
+        # Cleanup on failure
+        if spec.name in get_all_containers():
+            run_cmd(["nixos-container", "destroy", spec.name])
+        raise HTTPException(status_code=500, detail=f"Failed to create container: {str(e)}")
     
     return ContainerInfo(
         name=spec.name,
-        status="pending",
+        status="up",
         ip=spec.ip,
         host_port=spec.host_port,
         created_at=containers_db[spec.name]["created_at"]
     )
 
-@app.get("/api/v1/pending")
-async def list_pending():
-    """List containers that need 'apply' to activate"""
-    pending = []
-    
-    config_dir = "/etc/nix-fly/containers"
-    if os.path.exists(config_dir):
-        for f in os.listdir(config_dir):
-            if f.endswith('.nix') and f != 'imports.nix':
-                name = f[:-4]  # Remove .nix
-                existing = get_all_containers()
-                if name not in existing:
-                    pending.append({
-                        "name": name,
-                        "status": "pending",
-                        "action": "create",
-                        "config_file": f"{config_dir}/{f}"
-                    })
-    
-    return {"pending": pending}
-
-@app.post("/api/v1/apply")
-async def apply_changes():
-    """Apply pending container changes by rebuilding NixOS"""
-    pending = await list_pending()
-    
-    if not pending["pending"]:
-        return {"message": "No pending changes", "applied": []}
-    
-    names = [p["name"] for p in pending["pending"]]
-    
-    # Run nixos-rebuild switch (this could take a while)
-    stdout, stderr, rc = run_cmd(
-        ["nixos-rebuild", "switch", "--flake", "/home/nixos/code/nixos-infra-host#infra-host"],
-        capture=False,
-        timeout=300
-    )
-    
-    if rc != 0:
-        raise HTTPException(status_code=500, detail=f"Rebuild failed: {stderr}")
-    
-    return {
-        "message": "Applied pending changes",
-        "applied": names,
-        "containers": await list_containers()
-    }
-
 @app.get("/api/v1/containers/{name}", response_model=ContainerInfo)
 async def get_container(name: str):
     """Get container details"""
-    # Check if it's a pending container
-    config_file = f"/etc/nix-fly/containers/{name}.nix"
-    if os.path.exists(config_file) and name not in get_all_containers():
-        info = containers_db.get(name, {})
-        return ContainerInfo(
-            name=name,
-            status="pending",
-            ip=info.get("ip"),
-            host_port=info.get("host_port"),
-            created_at=info.get("created_at", "unknown")
-        )
-    
-    # Check running containers
     if name not in get_all_containers():
         raise HTTPException(status_code=404, detail=f"Container {name} not found")
     
+    status = get_container_status(name)
     info = containers_db.get(name, {})
+    
     return ContainerInfo(
         name=name,
-        status=get_container_status(name),
+        status=status,
         ip=info.get("ip"),
         host_port=info.get("host_port"),
         created_at=info.get("created_at", "unknown")
@@ -360,45 +383,49 @@ async def restart_container(name: str):
     if name not in get_all_containers():
         raise HTTPException(status_code=404, detail=f"Container {name} not found")
     
-    stdout, stderr, rc = run_cmd(["nixos-container", "restart", name])
-    
+    stdout, stderr, rc = run_cmd(["nixos-container", "stop", name], timeout=30)
     if rc != 0:
-        raise HTTPException(status_code=500, detail=f"Failed to restart: {stderr}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop: {stderr}")
     
-    return {"name": name, "status": "restarted", "new_status": get_container_status(name)}
+    stdout, stderr, rc = run_cmd(["nixos-container", "start", name], timeout=30)
+    if rc != 0:
+        raise HTTPException(status_code=500, detail=f"Failed to start: {stderr}")
+    
+    return {
+        "name": name,
+        "action": "restart",
+        "new_status": get_container_status(name)
+    }
 
 @app.delete("/api/v1/containers/{name}")
 async def destroy_container(name: str):
-    """Mark container for destruction (requires 'apply' to remove)"""
+    """Destroy a container immediately (no apply needed!)"""
     if name not in get_all_containers():
-        # Check if it's just a pending config
-        config_file = f"/etc/nix-fly/containers/{name}.nix"
-        if os.path.exists(config_file):
-            os.remove(config_file)
-            generate_imports_nix()
-            if name in containers_db:
-                del containers_db[name]
-                save_db(containers_db)
-            return {"name": name, "status": "destroyed", "note": "Pending config removed"}
-        
         raise HTTPException(status_code=404, detail=f"Container {name} not found")
+    
+    # Remove port forwarding if configured
+    info = containers_db.get(name, {})
+    if info.get("host_port") and info.get("ip"):
+        remove_port_forward(
+            info["host_port"],
+            info["ip"],
+            info.get("container_port", 3000)
+        )
+    
+    # Destroy the container
+    stdout, stderr, rc = run_cmd(["nixos-container", "destroy", name], timeout=60)
+    if rc != 0:
+        raise HTTPException(status_code=500, detail=f"Failed to destroy: {stderr}")
     
     # Remove from database
     if name in containers_db:
         del containers_db[name]
         save_db(containers_db)
     
-    # Remove config file
-    config_file = f"/etc/nix-fly/containers/{name}.nix"
-    if os.path.exists(config_file):
-        os.remove(config_file)
-        generate_imports_nix()
-    
-    # Note: Actual container destruction happens on next 'apply'
     return {
-        "name": name, 
-        "status": "marked_for_destruction",
-        "note": "Run 'apply' to complete destruction"
+        "name": name,
+        "action": "destroyed",
+        "status": "deleted"
     }
 
 @app.get("/api/v1/containers/{name}/logs")
@@ -436,14 +463,11 @@ async def container_logs(name: str, follow: bool = False, lines: int = 100):
 @app.get("/api/v1/nix-config/{name}")
 async def get_nix_config(name: str):
     """Get the NixOS configuration for a container"""
-    config_file = f"/etc/nix-fly/containers/{name}.nix"
-    if not os.path.exists(config_file):
+    info = containers_db.get(name)
+    if not info:
         raise HTTPException(status_code=404, detail=f"Config for {name} not found")
     
-    with open(config_file, 'r') as f:
-        content = f.read()
-    
-    return PlainTextResponse(content)
+    return PlainTextResponse(info.get("config", "# No config stored"))
 
 @app.get("/docs-ui", response_class=HTMLResponse)
 async def docs_ui():
@@ -461,37 +485,35 @@ async def docs_ui():
         .method { font-weight: bold; color: #007acc; }
         h1 { color: #333; }
         h2 { color: #555; border-bottom: 2px solid #eee; padding-bottom: 5px; }
-        .note { background: #fff3cd; padding: 10px 15px; border-radius: 5px; border-left: 4px solid #ffc107; }
+        .note { background: #d4edda; padding: 10px 15px; border-radius: 5px; border-left: 4px solid #28a745; }
     </style>
 </head>
 <body>
-    <h1>🚀 Nix-Fly API</h1>
-    <p>Fly.io-style container deployment for NixOS</p>
+    <h1>🚀 Nix-Fly API v2.0</h1>
+    <p>Dynamic Fly.io-style container deployment for NixOS</p>
     
     <div class="note">
-        <strong>Note:</strong> Creating/destroying containers writes NixOS configuration files to 
-        <code>/etc/nix-fly/containers/</code>. You must call <code>POST /api/v1/apply</code> 
-        to activate changes via <code>nixos-rebuild switch</code>.
+        <strong>✅ Dynamic Mode:</strong> Containers are created and started immediately using 
+        <code>nixos-container</code> with imperative management. No <code>nixos-rebuild switch</code> needed!
     </div>
     
     <h2>Quick Start</h2>
     <pre><code># List containers
 curl https://nix.latha.org/fly/api/v1/containers
 
-# Deploy a container (staged, not active yet)
+# Deploy a container (starts immediately!)
 curl -X POST https://nix.latha.org/fly/api/v1/containers \\
   -H "Content-Type: application/json" \\
-  -d '{"name": "myapp", "nix_config": "{ services.nginx.enable = true; }"}'
+  -d '{"name": "myapp", "nix_config": "{ services.nginx.enable = true; networking.firewall.allowedTCPPorts = [ 80 ]; }", "host_port": 8080}'
 
-# Apply changes (rebuilds NixOS)
-curl -X POST https://nix.latha.org/fly/api/v1/apply</code></pre>
+# Container is running immediately - no apply needed!</code></pre>
     
     <h2>Endpoints</h2>
     <div class="endpoint">
         <span class="method">GET</span> <strong>/api/v1/containers</strong> - List all containers
     </div>
     <div class="endpoint">
-        <span class="method">POST</span> <strong>/api/v1/containers</strong> - Stage new container
+        <span class="method">POST</span> <strong>/api/v1/containers</strong> - Create and start container immediately
         <pre>{"name": "my-app", "nix_config": "{ ... }", "host_port": 8080}</pre>
     </div>
     <div class="endpoint">
@@ -501,24 +523,26 @@ curl -X POST https://nix.latha.org/fly/api/v1/apply</code></pre>
         <span class="method">POST</span> <strong>/api/v1/containers/{name}/restart</strong> - Restart container
     </div>
     <div class="endpoint">
-        <span class="method">DELETE</span> <strong>/api/v1/containers/{name}</strong> - Mark for destruction
+        <span class="method">DELETE</span> <strong>/api/v1/containers/{name}</strong> - Destroy container immediately
     </div>
     <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/v1/containers/{name}/logs?follow=true</strong> - Stream logs
-    </div>
-    <div class="endpoint">
-        <span class="method">GET</span> <strong>/api/v1/pending</strong> - List staged changes
-    </div>
-    <div class="endpoint">
-        <span class="method">POST</span> <strong>/api/v1/apply</strong> - Apply all staged changes (rebuild)
+        <span class="method">GET</span> <strong>/api/v1/containers/{name}/logs</strong> - Stream logs
     </div>
     
-    <h2>OpenAPI Docs</h2>
-    <p><a href="/fly/docs">/fly/docs</a> - Interactive Swagger UI</p>
-    <p><a href="/fly/openapi.json">/fly/openapi.json</a> - OpenAPI schema</p>
+    <h2>Container Config</h2>
+    <p>The <code>nix_config</code> field is a Nix expression that gets merged into the container's configuration:</p>
+    <pre><code>{
+  services.nginx = {
+    enable = true;
+    virtualHosts.default.root = "${pkgs.nginx}/html";
+  };
+  networking.firewall.allowedTCPPorts = [ 80 ];
+}</code></pre>
+    
+    <p><em>Networking and base system are configured automatically.</em></p>
 </body>
 </html>
-    """
+"""
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
