@@ -132,7 +132,9 @@ def generate_html_page(title: str, body_content: str) -> str:
     <style>
         body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }}
         h1 {{ color: #333; border-bottom: 2px solid #5277c3; padding-bottom: 0.5rem; }}
-        .container {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }}
+        .container {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 0.5rem 0; background: white; }}
+        .project {{ margin: 1.5rem 0; }}
+        .project h2 {{ color: #333; border-bottom: 2px solid #5277c3; padding-bottom: 0.5rem; margin-bottom: 1rem; }}
         .status {{ display: inline-block; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.875rem; font-weight: 500; }}
         .status.up {{ background: #d4edda; color: #155724; }}
         .status.down {{ background: #f8d7da; color: #721c24; }}
@@ -209,27 +211,38 @@ async def root_page(request: Request):
                 "status": status,
                 "ip": info.get("ip"),
                 "host_port": info.get("host_port"),
-                "owner": owner or "unclaimed"
+                "owner": owner or "unclaimed",
+                "project": info.get("project") or "default"
             })
     
-    # Build container list HTML
+    # Group containers by project
+    from collections import defaultdict
+    by_project = defaultdict(list)
+    for c in visible_containers:
+        by_project[c["project"]].append(c)
+    
+    # Build container list HTML grouped by project
     containers_html = ""
     if visible_containers:
-        for c in visible_containers:
-            status_class = "up" if c["status"] == "up" else "down"
-            port_info = f" (Port {c['host_port']})" if c["host_port"] else ""
-            
-            # Make service name a clickable link if port is known
-            name_display = c["name"]
-            if c["host_port"]:
-                name_display = f'<a href="http://204.168.220.202:{c["host_port"]}" target="_blank">{c["name"]}</a>'
-            
-            containers_html += f'''
-            <div class="container">
-                <strong>{name_display}</strong> 
-                <span class="status {status_class}">{c["status"]}</span>
-                <span style="color: #666; margin-left: 1rem;">Owner: {c["owner"]}{port_info}</span>
-            </div>'''
+        for project in sorted(by_project.keys()):
+            containers = by_project[project]
+            containers_html += f'<div class="project"><h2>📁 {project}</h2>'
+            for c in containers:
+                status_class = "up" if c["status"] == "up" else "down"
+                port_info = f" (Port {c['host_port']})" if c["host_port"] else ""
+                
+                # Make service name a clickable link if port is known
+                name_display = c["name"]
+                if c["host_port"]:
+                    name_display = f'<a href="http://204.168.220.202:{c["host_port"]}" target="_blank">{c["name"]}</a>'
+                
+                containers_html += f'''
+                <div class="container">
+                    <strong>{name_display}</strong> 
+                    <span class="status {status_class}">{c["status"]}</span>
+                    <span style="color: #666; margin-left: 1rem;">{c["owner"]}{port_info}</span>
+                </div>'''
+            containers_html += '</div>'
     else:
         containers_html = "<p>No containers found.</p>"
     
