@@ -844,15 +844,39 @@ async def deploy_project(
             detail="No ncp.containers defined in flake.nix"
         )
     
-    # Get current containers for this project
+    # Get current containers for this project (verify they actually exist)
+    existing_containers = get_all_containers()  # Containers that actually exist on system
     current_containers = {
         name: info for name, info in containers_db.items()
-        if info.get('owner') == user and info.get('project') == project_name
+        if info.get('owner') == user 
+        and info.get('project') == project_name
+        and name in existing_containers  # Verify container actually exists
     }
     
     # Calculate desired state
     desired_names = set(containers_def.keys())
     current_names = set(current_containers.keys())
+    
+    # Also clean up stale DB entries (containers in DB but not on system)
+    stale_entries = set()
+    for name, info in containers_db.items():
+        if info.get('owner') == user and info.get('project') == project_name:
+            if name not in existing_containers:
+                stale_entries.add(name)
+    
+    # Remove stale entries from DB
+    for name in stale_entries:
+        del containers_db[name]
+        # Also clean up port forwarding if any
+        info = containers_db.get(name, {})
+        if info.get('host_port') and info.get('ip'):
+            try:
+                remove_port_forward(info['host_port'], info['ip'], info.get('container_port', 80))
+            except:
+                pass  # Ignore errors for stale cleanup
+    
+    if stale_entries:
+        save_db(CONTAINERS_DB_FILE, containers_db)
     
     to_create = desired_names - current_names
     to_destroy = current_names - desired_names
