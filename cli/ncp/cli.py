@@ -652,8 +652,20 @@ def _get_project_secrets_dir() -> Path:
 
 
 def _get_secrets_nix_path() -> Path:
-    """Get the path to secrets.nix"""
-    return Path.cwd() / "secrets.nix"
+    """Get the path to .agenix.toml (new format) or secrets.nix (legacy)"""
+    cwd = Path.cwd()
+    # Prefer new TOML format
+    toml_path = cwd / ".agenix.toml"
+    if toml_path.exists():
+        return toml_path
+    # Fall back to legacy Nix format
+    return cwd / "secrets.nix"
+
+
+def _agenix_config_exists() -> bool:
+    """Check if agenix config exists (either format)"""
+    cwd = Path.cwd()
+    return (cwd / ".agenix.toml").exists() or (cwd / "secrets.nix").exists()
 
 
 def _find_ssh_pubkey() -> Optional[str]:
@@ -676,17 +688,22 @@ def init(key):
     """Initialize agenix secrets in current project"""
     project_dir = Path.cwd()
     secrets_dir = _get_project_secrets_dir()
-    secrets_nix = _get_secrets_nix_path()
+    agenix_toml = project_dir / ".agenix.toml"
     
-    # Check if already initialized
-    if secrets_nix.exists():
-        click.echo("⚠️  secrets.nix already exists in this directory")
-        if not click.confirm("Reinitialize? (this will backup existing secrets.nix)"):
+    # Check if already initialized (new or legacy format)
+    if agenix_toml.exists() or (project_dir / "secrets.nix").exists():
+        click.echo("⚠️  Agenix config already exists in this directory")
+        if not click.confirm("Reinitialize? (this will backup existing config)"):
             return
         # Backup existing
-        backup_path = secrets_nix.with_suffix('.nix.backup')
-        secrets_nix.rename(backup_path)
-        click.echo(f"📦 Backed up existing secrets.nix to {backup_path}")
+        if agenix_toml.exists():
+            backup_path = agenix_toml.with_suffix('.toml.backup')
+            agenix_toml.rename(backup_path)
+            click.echo(f"📦 Backed up existing .agenix.toml to {backup_path}")
+        if (project_dir / "secrets.nix").exists():
+            backup_path = project_dir / "secrets.nix.backup"
+            (project_dir / "secrets.nix").rename(backup_path)
+            click.echo(f"📦 Backed up existing secrets.nix to {backup_path}")
     
     # Find SSH key
     if not key:
@@ -714,51 +731,33 @@ def init(key):
     secrets_dir.mkdir(exist_ok=True)
     (secrets_dir / ".gitignore").write_text("*\n!.gitignore\n")
     
-    # Create initial secrets.nix
-    secrets_nix_content = f'''# Agenix secrets configuration
+    # Create .agenix.toml in new TOML format
+    agenix_toml_content = f'''# Agenix secrets configuration (TOML format)
 # This file defines who can decrypt which secrets
 # DO NOT COMMIT THE secrets/ DIRECTORY - only commit this file
 
-let
-  # Add more SSH keys here to grant access
-  # other_user = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host";
-in
-{{
-  # Example: secret for database password
-  # "secrets/database_password.age".publicKeys = [ users_key ];
+# Define who can decrypt secrets
+[[identities]]
+name = "default"
+public_key = "{key_content}"
 
-  # Template for new secrets - copy and modify
-  # "secrets/my_secret.age".publicKeys = [ users_key ];
-}}
+# Add more identities here
+# [[identities]]
+# name = "other_user"
+# public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
+
+# Secret definitions
+# [[paths]]
+# path = "secrets/my_secret.age"
+# glob = "secrets/my_secret.age"
+# identities = [ "default" ]
 '''
     
-    # Substitute the actual key
-    secrets_nix_content = secrets_nix_content.replace('users_key', f'users_key /* {key_path.name} */')
+    agenix_toml.write_text(agenix_toml_content)
     
-    # Write the file with user's key
-    with open(secrets_nix, 'w') as f:
-        # Write properly formatted secrets.nix
-        f.write(f'''# Agenix secrets configuration
-# This file defines who can decrypt which secrets
-# DO NOT COMMIT THE secrets/ DIRECTORY - only commit this file
-
-let
-  users_key = "{key_content}";
-  # Add more SSH keys here to grant access
-  # other_user = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host";
-in
-{{
-  # Example: secret for database password
-  # "secrets/database_password.age".publicKeys = [ users_key ];
-
-  # Template for new secrets - copy and modify
-  # "secrets/my_secret.age".publicKeys = [ users_key ];
-}}
-''')
-    
-    click.echo("✅ Initialized agenix in current project")
+    click.echo("✅ Initialized agenix in current project (TOML format)")
     click.echo(f"   Secrets directory: {secrets_dir}/")
-    click.echo(f"   Config file: {secrets_nix}")
+    click.echo(f"   Config file: {agenix_toml}")
     click.echo(f"   Encryption key: {key_path}")
     click.echo("")
     click.echo("Next steps:")
@@ -774,10 +773,12 @@ in
 @click.option('--from-file', '-f', type=click.Path(exists=True), help='Read secret from file')
 def set(name, value, from_file):
     """Create or update an encrypted secret"""
-    secrets_nix = _get_secrets_nix_path()
+    project_dir = Path.cwd()
     secrets_dir = _get_project_secrets_dir()
+    agenix_toml = project_dir / ".agenix.toml"
     
-    if not secrets_nix.exists():
+    # Check for new or legacy format
+    if not agenix_toml.exists() and not (project_dir / "secrets.nix").exists():
         click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
         sys.exit(1)
     
@@ -799,25 +800,26 @@ def set(name, value, from_file):
     secret_relative = f"secrets/{name}"
     secret_path = secrets_dir / name
     
-    # STEP 1: Add secret to secrets.nix if not already there
-    secrets_nix_content = secrets_nix.read_text()
-    secret_entry = f'"{secret_relative}".publicKeys = [ users_key ];'
-    
-    if secret_relative not in secrets_nix_content:
-        click.echo(f"📝 Adding {secret_relative} to secrets.nix...")
-        # Find the closing brace and insert before it
-        lines = secrets_nix_content.split('\n')
-        # Look for the closing `}` of the attribute set
-        insert_idx = len(lines)
-        for i, line in enumerate(lines):
-            if line.strip() == '}' and i > len(lines) - 5:  # Last closing brace
-                insert_idx = i
-                break
+    # STEP 1: Add secret to .agenix.toml if using new format
+    if agenix_toml.exists():
+        toml_content = agenix_toml.read_text()
         
-        # Insert the new secret entry
-        lines.insert(insert_idx, f'  {secret_entry}')
-        secrets_nix.write_text('\n'.join(lines))
-        click.echo(f"   ✓ Added to secrets.nix")
+        if secret_relative not in toml_content:
+            click.echo(f"📝 Adding {secret_relative} to .agenix.toml...")
+            
+            # Append new path entry to TOML
+            new_entry = f'''
+[[paths]]
+path = "{secret_relative}"
+glob = "{secret_relative}"
+identities = [ "default" ]
+'''
+            with open(agenix_toml, 'a') as f:
+                f.write(new_entry)
+            click.echo(f"   ✓ Added to .agenix.toml")
+    else:
+        # Legacy format - add to secrets.nix
+        click.echo(f"⚠️  Using legacy secrets.nix format. Consider migrating to .agenix.toml")
     
     # STEP 2: Create temp file with secret value
     import tempfile
@@ -828,10 +830,6 @@ def set(name, value, from_file):
     
     try:
         # STEP 3: Encrypt using agenix
-        # For new secrets, we need to use EDITOR to create the file
-        # agenix will use the EDITOR to create the file, but we want to automate this
-        # So we use a trick: set EDITOR to cat the temp file
-        
         env = os.environ.copy()
         env['EDITOR'] = f'cat {tmp_path}'
         
@@ -840,7 +838,7 @@ def set(name, value, from_file):
             ['agenix', '-e', secret_relative],
             capture_output=True,
             text=True,
-            cwd=str(Path.cwd()),
+            cwd=str(project_dir),
             env=env
         )
         
@@ -850,7 +848,6 @@ def set(name, value, from_file):
         
         click.echo(f"✅ Secret saved: {secret_path}")
         click.echo(f"   Size: {len(value)} bytes encrypted")
-        click.echo(f"   Entry in secrets.nix: {secret_entry}")
         
     finally:
         # Securely delete temp file
@@ -861,10 +858,9 @@ def set(name, value, from_file):
 @click.argument('name')
 def edit(name):
     """Edit an existing secret"""
-    secrets_nix = _get_secrets_nix_path()
     secrets_dir = _get_project_secrets_dir()
     
-    if not secrets_nix.exists():
+    if not _agenix_config_exists():
         click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
         sys.exit(1)
     
@@ -880,8 +876,9 @@ def edit(name):
         sys.exit(1)
     
     # Open in agenix editor
+    secret_relative = f"secrets/{name}"
     result = subprocess.run(
-        ['agenix', '-e', str(secret_path)],
+        ['agenix', '-e', secret_relative],
         capture_output=True,
         text=True,
         cwd=str(Path.cwd())
@@ -898,10 +895,9 @@ def edit(name):
 @click.argument('name')
 def show(name):
     """Decrypt and display a secret (use with caution!)"""
-    secrets_nix = _get_secrets_nix_path()
     secrets_dir = _get_project_secrets_dir()
     
-    if not secrets_nix.exists():
+    if not _agenix_config_exists():
         click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
         sys.exit(1)
     
@@ -916,8 +912,9 @@ def show(name):
         sys.exit(1)
     
     # Decrypt using agenix
+    secret_relative = f"secrets/{name}"
     result = subprocess.run(
-        ['agenix', '-d', str(secret_path)],
+        ['agenix', '-d', secret_relative],
         capture_output=True,
         text=True,
         cwd=str(Path.cwd())
@@ -935,10 +932,9 @@ def show(name):
 @secrets.command()
 def list():
     """List all secrets"""
-    secrets_nix = _get_secrets_nix_path()
     secrets_dir = _get_project_secrets_dir()
     
-    if not secrets_nix.exists():
+    if not _agenix_config_exists():
         click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
         sys.exit(1)
     
