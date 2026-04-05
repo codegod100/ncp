@@ -26,21 +26,24 @@ HTML_CONTENT = b"""<!DOCTYPE html>
             let backendUrl = null;
             let backendHostname = null;
             
-            // Strategy 1: Try NCP API (works if container is public or user is logged in)
+            // Strategy 1: Try NCP discovery API (public, no auth needed)
             try {
                 const apiUrl = window.location.protocol + '//nix.latha.org/api/v1';
-                const containersResp = await fetch(apiUrl + '/containers');
-                if (containersResp.ok) {
-                    const containers = await containersResp.json();
-                    // Find backend container (not frontend, with hostname)
-                    const backend = containers.find(c => c.name !== 'frontend' && c.hostname);
-                    if (backend && backend.hostname) {
-                        backendHostname = backend.hostname;
-                        backendUrl = 'https://' + backend.hostname + '/';
+                // Extract project from current hostname (e.g., simple-frontend -> simple)
+                const hostname = window.location.hostname;
+                const projectMatch = hostname.match(/^([a-z]+)-/);
+                const project = projectMatch ? projectMatch[1] : 'simple';
+                
+                const discoverResp = await fetch(apiUrl + '/discover/' + project + '/backend');
+                if (discoverResp.ok) {
+                    const info = await discoverResp.json();
+                    if (info.hostname) {
+                        backendHostname = info.hostname;
+                        backendUrl = info.url;
                     }
                 }
             } catch (e) {
-                console.log('NCP API discovery failed:', e);
+                console.log('NCP discovery failed:', e);
             }
             
             // Strategy 2: Fall back to port-based URL (HTTP, not HTTPS since ports are plain HTTP)

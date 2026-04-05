@@ -728,6 +728,48 @@ async def list_containers(user: Optional[str] = Depends(optional_user)):
     return result
 
 
+@app.get("/api/v1/discover/{project}")
+async def discover_project(project: str):
+    """Public endpoint for container service discovery within a project.
+    
+    Returns container hostnames for inter-container communication.
+    No authentication required - containers can discover each other.
+    """
+    logger.info(f"[DISCOVER] Service discovery for project '{project}'")
+    
+    result = []
+    for name, info in db.containers_db.items():
+        if info.get("project") == project and info.get("hostname"):
+            result.append({
+                "name": name,
+                "hostname": info.get("hostname"),
+                "status": get_container_status(name)
+            })
+    
+    logger.info(f"[DISCOVER] Found {len(result)} containers in project '{project}'")
+    return result
+
+
+@app.get("/api/v1/discover/{project}/{container_name}")
+async def discover_container(project: str, container_name: str):
+    """Public endpoint to discover a specific container's hostname."""
+    logger.info(f"[DISCOVER] Looking up '{container_name}' in project '{project}'")
+    
+    full_name = f"{project}-{container_name}"
+    info = db.containers_db.get(full_name)
+    
+    if not info or not info.get("hostname"):
+        logger.warning(f"[DISCOVER] Container '{full_name}' not found or no hostname")
+        raise HTTPException(404, f"Container '{container_name}' not found in project '{project}'")
+    
+    return {
+        "name": container_name,
+        "hostname": info.get("hostname"),
+        "status": get_container_status(full_name),
+        "url": f"https://{info.get('hostname')}/"
+    }
+
+
 @app.post("/api/v1/containers", response_model=ContainerInfo)
 async def create_container(
     req: ContainerCreateRequest,
