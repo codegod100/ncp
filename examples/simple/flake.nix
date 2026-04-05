@@ -5,46 +5,54 @@
   outputs = { self, nixpkgs }: {
     nixosConfigurations.backend = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
-      modules = [({ pkgs, ... }: {
-        boot.isContainer = true;
-        networking.useDHCP = false;
-        networking.firewall = {
-          enable = true;
-          allowedTCPPorts = [ 80 ];
-        };
-        
-        systemd.services.backend = {
-          description = "Backend API Server";
-          wantedBy = [ "multi-user.target" ];
-          after = [ "network.target" ];
-          serviceConfig = {
-            ExecStart = "${pkgs.python3}/bin/python3 ${pkgs.writeText \"backend.py\" (builtins.readFile ./backend.py)}";
-            Restart = "always";
+      modules = [({ pkgs, ... }: 
+        let
+          backendScript = pkgs.writeText "backend.py" (builtins.readFile ./backend.py);
+        in {
+          boot.isContainer = true;
+          networking.useDHCP = false;
+          networking.firewall = {
+            enable = true;
+            allowedTCPPorts = [ 80 ];
           };
-        };
-      })];
+          
+          systemd.services.backend = {
+            description = "Backend API Server";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network.target" ];
+            serviceConfig = {
+              ExecStart = "${pkgs.python3}/bin/python3 ${backendScript}";
+              Restart = "always";
+            };
+          };
+        }
+      )];
     };
     
     nixosConfigurations.frontend = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
-      modules = [({ pkgs, ... }: {
-        boot.isContainer = true;
-        networking.useDHCP = false;
-        networking.firewall = {
-          enable = true;
-          allowedTCPPorts = [ 80 ];
-        };
-        
-        systemd.services.frontend = {
-          description = "Frontend Web Server";
-          wantedBy = [ "multi-user.target" ];
-          after = [ "network.target" ];
-          serviceConfig = {
-            ExecStart = "${pkgs.python3}/bin/python3 ${pkgs.writeText \"frontend.py\" (builtins.readFile ./frontend.py)}";
-            Restart = "always";
+      modules = [({ pkgs, ... }:
+        let
+          frontendScript = pkgs.writeText "frontend.py" (builtins.readFile ./frontend.py);
+        in {
+          boot.isContainer = true;
+          networking.useDHCP = false;
+          networking.firewall = {
+            enable = true;
+            allowedTCPPorts = [ 80 ];
           };
-        };
-      })];
+          
+          systemd.services.frontend = {
+            description = "Frontend Web Server";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network.target" ];
+            serviceConfig = {
+              ExecStart = "${pkgs.python3}/bin/python3 ${frontendScript}";
+              Restart = "always";
+            };
+          };
+        }
+      )];
     };
     
     ncp.containers = {
