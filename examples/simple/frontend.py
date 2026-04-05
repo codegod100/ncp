@@ -43,10 +43,10 @@ HTML_CONTENT = b"""<!DOCTYPE html>
                 console.log('NCP API discovery failed:', e);
             }
             
-            // Strategy 2: Fall back to port-based URL
+            // Strategy 2: Fall back to port-based URL (HTTP, not HTTPS since ports are plain HTTP)
             if (!backendUrl) {
-                backendUrl = window.location.protocol + '//' + window.location.hostname + ':9001/';
-                backendHostname = window.location.hostname + ':9001';
+                backendUrl = 'http://nix.latha.org:9001/';
+                backendHostname = 'nix.latha.org:9001';
                 dataDiv.innerHTML = '<span class="loading">API discovery failed, trying port fallback...</span>';
             }
             
