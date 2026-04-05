@@ -76,11 +76,19 @@ in {
     };
   };
 
-  # Caddy reverse proxy
+  # Caddy reverse proxy with admin API for dynamic routes
   services.caddy = {
     enable = true;
     
+    globalConfig = ''
+      {
+        admin :2019
+        auto_https off
+      }
+    '';
+    
     extraConfig = ''
+      # Main API and web interface
       nix.latha.org {
         # API calls at /api/* - proxy with path intact
         handle /api/* {
@@ -98,21 +106,11 @@ in {
         }
       }
       
-      http://nix.latha.org {
-        redir https://nix.latha.org{uri} permanent
-      }
+      # Dynamic container subdomains - initial empty, populated via API
+      # Routes will be added by NCP API at /config/apps/http/servers/srv0/routes
       
-      :80 {
-        # API calls at /api/*
-        handle /api/* {
-          reverse_proxy localhost:8000
-        }
-        
-        # All paths to API
-        handle {
-          reverse_proxy localhost:8000
-        }
-      }
+      # Wildcard catch-all for container subdomains (uses Caddyfile for static, API for dynamic)
+      # This is a placeholder - actual routes added via admin API
     '';
   };
 

@@ -13,6 +13,7 @@ class ContainerInfo(BaseModel):
     created_at: Optional[str] = None
     owner: Optional[str] = "unclaimed"
     project: Optional[str] = None
+    hostname: Optional[str] = None  # Caddy subdomain (e.g., container-name.nix.latha.org)
 
 
 class ContainerCreateRequest(BaseModel):

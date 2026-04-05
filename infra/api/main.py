@@ -65,6 +65,147 @@ CONTAINER_HOST_IP = os.getenv("CONTAINER_HOST_IP", "10.100.0.1")
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 
+# Caddy admin API settings
+CADDY_ADMIN_API = os.getenv("CADDY_ADMIN_API", "http://localhost:2019")
+CADDY_BASE_DOMAIN = os.getenv("CADDY_BASE_DOMAIN", "nix.latha.org")
+
+
+# Caddy Dynamic Route Manager
+class CaddyManager:
+    """Manages Caddy reverse proxy routes via admin API."""
+    
+    def __init__(self, admin_api: str = CADDY_ADMIN_API, base_domain: str = CADDY_BASE_DOMAIN):
+        self.admin_api = admin_api.rstrip('/')
+        self.base_domain = base_domain
+        self._session = None
+    
+    def _get_session(self):
+        """Get or create aiohttp session."""
+        if self._session is None:
+            import requests
+            self._session = requests.Session()
+        return self._session
+    
+    def add_container_route(self, container_name: str, container_ip: str, 
+                           container_port: int = 80, 
+                           custom_hostname: str = None) -> dict:
+        """Add a new route for a container subdomain."""
+        import requests
+        
+        hostname = custom_hostname or f"{container_name}.{self.base_domain}"
+        route_id = f"container-{container_name}"
+        upstream = f"{container_ip}:{container_port}"
+        
+        # Check if route already exists
+        existing = self.get_route(route_id)
+        if existing:
+            logger.info(f"[CADDY] Route {route_id} already exists, updating...")
+            self.remove_route(route_id)
+        
+        # Build Caddy route config
+        route_config = {
+            "@id": route_id,
+            "match": [{"host": [hostname]}],
+            "handle": [
+                {
+                    "handler": "reverse_proxy",
+                    "upstreams": [{"dial": upstream}]
+                }
+            ],
+            "terminal": True
+        }
+        
+        try:
+            # Add route to Caddy
+            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes"
+            resp = requests.post(url, json=route_config, timeout=10)
+            
+            if resp.status_code in [200, 201]:
+                logger.info(f"[CADDY] ✓ Added route: {hostname} → {upstream}")
+                return {
+                    "success": True,
+                    "hostname": hostname,
+                    "upstream": upstream,
+                    "route_id": route_id
+                }
+            else:
+                logger.error(f"[CADDY] ✗ Failed to add route: {resp.status_code} {resp.text}")
+                return {
+                    "success": False,
+                    "error": f"Caddy API returned {resp.status_code}",
+                    "details": resp.text
+                }
+                
+        except Exception as e:
+            logger.error(f"[CADDY] ✗ Error adding route: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def remove_route(self, route_id: str) -> dict:
+        """Remove a route by ID."""
+        import requests
+        
+        try:
+            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes/{route_id}"
+            resp = requests.delete(url, timeout=10)
+            
+            if resp.status_code in [200, 204]:
+                logger.info(f"[CADDY] ✓ Removed route: {route_id}")
+                return {"success": True, "route_id": route_id}
+            elif resp.status_code == 404:
+                logger.info(f"[CADDY] Route not found: {route_id}")
+                return {"success": True, "route_id": route_id, "note": "Route did not exist"}
+            else:
+                logger.error(f"[CADDY] ✗ Failed to remove route: {resp.status_code}")
+                return {"success": False, "error": f"HTTP {resp.status_code}"}
+                
+        except Exception as e:
+            logger.error(f"[CADDY] ✗ Error removing route: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def remove_container_route(self, container_name: str) -> dict:
+        """Remove route for a container."""
+        route_id = f"container-{container_name}"
+        return self.remove_route(route_id)
+    
+    def get_route(self, route_id: str) -> Optional[dict]:
+        """Get a specific route by ID."""
+        import requests
+        
+        try:
+            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes/{route_id}"
+            resp = requests.get(url, timeout=10)
+            
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+            
+        except Exception as e:
+            logger.debug(f"[CADDY] Error getting route: {e}")
+            return None
+    
+    def list_routes(self) -> List[dict]:
+        """List all container routes."""
+        import requests
+        
+        try:
+            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes"
+            resp = requests.get(url, timeout=10)
+            
+            if resp.status_code == 200:
+                routes = resp.json()
+                # Filter to only container routes
+                return [r for r in routes if r.get("@id", "").startswith("container-")]
+            return []
+            
+        except Exception as e:
+            logger.error(f"[CADDY] ✗ Error listing routes: {e}")
+            return []
+
+
+# Initialize Caddy manager
+caddy = CaddyManager()
+
+
 app = FastAPI(title="NCP API", version="1.0.0")
 
 app.add_middleware(
@@ -528,7 +669,8 @@ async def list_containers(user: Optional[str] = Depends(optional_user)):
             host_port=info.get("host_port"),
             created_at=info.get("created_at"),
             owner=owner or "unclaimed",
-            project=info.get("project")
+            project=info.get("project"),
+            hostname=info.get("hostname")
         ))
     
     logger.info(f"[LIST] Returning {len(result)} containers for '{user_str}'")
@@ -607,13 +749,28 @@ async def create_container(
     save_db(CONTAINERS_DB_FILE, db.containers_db)
     logger.info(f"[CREATE] ✓ Container '{full_name}' fully deployed and saved")
     
+    # Add Caddy route for subdomain access
+    logger.info(f"[CREATE] Adding Caddy route for '{full_name}'...")
+    caddy_result = caddy.add_container_route(
+        container_name=full_name,
+        container_ip=ip,
+        container_port=req.container_port or 80
+    )
+    if caddy_result.get("success"):
+        db.containers_db[full_name]["hostname"] = caddy_result["hostname"]
+        save_db(CONTAINERS_DB_FILE, db.containers_db)
+        logger.info(f"[CREATE] ✓ Caddy route added: {caddy_result['hostname']} → {caddy_result['upstream']}")
+    else:
+        logger.warning(f"[CREATE] ⚠ Failed to add Caddy route: {caddy_result.get('error')}")
+    
     return ContainerInfo(
         name=full_name,
         status="up",
         ip=ip,
         host_port=req.port,
         created_at=db.containers_db[full_name]["created_at"],
-        owner=user
+        owner=user,
+        hostname=db.containers_db[full_name].get("hostname")
     )
 
 
@@ -637,6 +794,14 @@ async def destroy_container(req: ContainerDestroyRequest, user: str = Depends(re
     if info.get("host_port") and info.get("ip"):
         logger.info(f"[DESTROY] Removing port forward for '{full_name}'...")
         remove_port_forward(info["host_port"], info["ip"], info.get("container_port", 80))
+    
+    # Remove Caddy route
+    logger.info(f"[DESTROY] Removing Caddy route for '{full_name}'...")
+    caddy_result = caddy.remove_container_route(full_name)
+    if caddy_result.get("success"):
+        logger.info(f"[DESTROY] ✓ Caddy route removed for '{full_name}'")
+    else:
+        logger.warning(f"[DESTROY] ⚠ Failed to remove Caddy route: {caddy_result.get('error')}")
     
     # Destroy container
     logger.info(f"[DESTROY] Running nixos-container destroy '{full_name}'...")
@@ -1026,6 +1191,73 @@ async def delete_secret(secret_name: str, user: str = Depends(require_user)):
     secret_path.unlink()
     logger.info(f"[SECRETS] ✓ Secret '{secret_name}' deleted")
     return {"success": True, "message": f"Secret '{secret_name}' deleted"}
+
+
+# Caddy Routes Management Endpoints
+@app.get("/api/v1/routes")
+async def list_caddy_routes(user: str = Depends(require_user)):
+    """List all Caddy container routes."""
+    logger.info(f"[ROUTES] User '{user}' listing Caddy routes")
+    routes = caddy.list_routes()
+    return {"routes": routes, "count": len(routes)}
+
+
+@app.post("/api/v1/routes/{container_name}")
+async def add_caddy_route(
+    container_name: str,
+    container_port: int = 80,
+    custom_hostname: str = None,
+    user: str = Depends(require_user)
+):
+    """Manually add a Caddy route for a container."""
+    logger.info(f"[ROUTES] User '{user}' adding route for '{container_name}'")
+    
+    # Get container info
+    info = db.containers_db.get(container_name)
+    if not info:
+        raise HTTPException(404, f"Container '{container_name}' not found")
+    
+    if info.get("owner") != user and not db.users_db.get(user, {}).get("is_admin"):
+        raise HTTPException(403, "Not owner of this container")
+    
+    result = caddy.add_container_route(
+        container_name=container_name,
+        container_ip=info["ip"],
+        container_port=container_port,
+        custom_hostname=custom_hostname
+    )
+    
+    if not result.get("success"):
+        raise HTTPException(500, result.get("error", "Failed to add route"))
+    
+    # Update DB with hostname
+    info["hostname"] = result["hostname"]
+    save_db(CONTAINERS_DB_FILE, db.containers_db)
+    
+    return result
+
+
+@app.delete("/api/v1/routes/{container_name}")
+async def remove_caddy_route(container_name: str, user: str = Depends(require_user)):
+    """Remove a Caddy route for a container."""
+    logger.info(f"[ROUTES] User '{user}' removing route for '{container_name}'")
+    
+    info = db.containers_db.get(container_name)
+    if info:
+        if info.get("owner") != user and not db.users_db.get(user, {}).get("is_admin"):
+            raise HTTPException(403, "Not owner of this container")
+    
+    result = caddy.remove_container_route(container_name)
+    
+    if not result.get("success"):
+        raise HTTPException(500, result.get("error", "Failed to remove route"))
+    
+    # Remove hostname from DB if exists
+    if info and "hostname" in info:
+        del info["hostname"]
+        save_db(CONTAINERS_DB_FILE, db.containers_db)
+    
+    return result
 
 
 # Admin endpoints
