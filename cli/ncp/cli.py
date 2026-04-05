@@ -194,6 +194,32 @@ class NCPClient:
         self._handle_error(response)
         return response.json()
 
+    # Caddy Routes API methods
+    def list_routes(self):
+        """List all Caddy routes for containers"""
+        response = self.session.get(self._url('/api/v1/routes'))
+        self._handle_error(response)
+        return response.json()
+    
+    def add_route(self, container_name: str, container_port: int = 80, custom_hostname: str = None):
+        """Add a Caddy route for an existing container"""
+        params = {"container_port": container_port}
+        if custom_hostname:
+            params["custom_hostname"] = custom_hostname
+        
+        response = self.session.post(
+            self._url(f'/api/v1/routes/{container_name}'),
+            params=params
+        )
+        self._handle_error(response)
+        return response.json()
+    
+    def remove_route(self, container_name: str):
+        """Remove a Caddy route for a container"""
+        response = self.session.delete(self._url(f'/api/v1/routes/{container_name}'))
+        self._handle_error(response)
+        return response.json()
+
 
 @click.group()
 @click.option('--api-url', envvar='NCP_API_URL', default=DEFAULT_API_URL,
