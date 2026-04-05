@@ -119,8 +119,6 @@ in {
         };
       };
     });
-    
-    adapter = "json";
   };
 
   # Firewall
