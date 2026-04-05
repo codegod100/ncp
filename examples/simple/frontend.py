@@ -15,22 +15,42 @@ HTML_CONTENT = b"""<!DOCTYPE html>
 </head>
 <body>
     <h1>Hello from Frontend</h1>
-    <p>This page fetches data from the backend container via HTTPS at <code>backend.nix.latha.org</code>.</p>
-    <div id="data"><span class="loading">Loading from backend...</span></div>
+    <p>This page fetches data from the backend container via HTTPS (discovered via NCP API).</p>
+    <div id="data"><span class="loading">Discovering backend...</span></div>
     
     <script>
         async function fetchFromBackend() {
             const dataDiv = document.getElementById('data');
             try {
-                // Backend is available at backend.nix.latha.org via Caddy
-                const backendUrl = 'https://backend.nix.latha.org/';
+                // First, discover backend hostname from NCP API
+                // Get project name from current hostname (frontend.nix.latha.org -> simple)
+                const currentHost = window.location.hostname;
+                const projectName = 'simple'; // Could be extracted from hostname or config
+                
+                // Query NCP API for containers in this project
+                const apiUrl = window.location.protocol + '//nix.latha.org/api/v1';
+                const containersResp = await fetch(apiUrl + '/containers');
+                if (!containersResp.ok) throw new Error('Failed to query NCP API: ' + containersResp.status);
+                
+                const containers = await containersResp.json();
+                // Find backend container (not frontend, with hostname)
+                const backend = containers.find(c => c.name !== 'frontend' && c.hostname);
+                
+                if (!backend || !backend.hostname) {
+                    throw new Error('No backend container found with hostname');
+                }
+                
+                dataDiv.innerHTML = '<span class="loading">Found backend at ' + backend.hostname + ', fetching data...</span>';
+                
+                // Now fetch from discovered backend
+                const backendUrl = 'https://' + backend.hostname + '/';
                 const response = await fetch(backendUrl);
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const data = await response.json();
-                dataDiv.innerHTML = '<span class="success">Backend says:</span> <pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                dataDiv.innerHTML = '<span class="success">Backend (' + backend.hostname + ') says:</span> <pre>' + JSON.stringify(data, null, 2) + '</pre>';
             } catch (err) {
-                dataDiv.innerHTML = '<span class="error">Error fetching from backend:</span> ' + err.message + 
-                                   '<br><small>Make sure backend container is running with hostname backend.nix.latha.org</small>';
+                dataDiv.innerHTML = '<span class="error">Error:</span> ' + err.message + 
+                                   '<br><small>Make sure backend container is running and has a hostname assigned</small>';
             }
         }
         
