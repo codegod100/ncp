@@ -755,19 +755,22 @@ async def discover_container(project: str, container_name: str):
     """Public endpoint to discover a specific container's hostname."""
     logger.info(f"[DISCOVER] Looking up '{container_name}' in project '{project}'")
     
-    full_name = f"{project}-{container_name}"
-    info = db.containers_db.get(full_name)
+    # Find container by name and project (not full_name with prefix)
+    for name, info in db.containers_db.items():
+        if name == container_name and info.get("project") == project:
+            if info.get("hostname"):
+                return {
+                    "name": container_name,
+                    "hostname": info.get("hostname"),
+                    "status": get_container_status(name),
+                    "url": f"https://{info.get('hostname')}/"
+                }
+            else:
+                logger.warning(f"[DISCOVER] Container '{container_name}' has no hostname")
+                raise HTTPException(404, f"Container '{container_name}' has no hostname assigned")
     
-    if not info or not info.get("hostname"):
-        logger.warning(f"[DISCOVER] Container '{full_name}' not found or no hostname")
-        raise HTTPException(404, f"Container '{container_name}' not found in project '{project}'")
-    
-    return {
-        "name": container_name,
-        "hostname": info.get("hostname"),
-        "status": get_container_status(full_name),
-        "url": f"https://{info.get('hostname')}/"
-    }
+    logger.warning(f"[DISCOVER] Container '{container_name}' not found in project '{project}'")
+    raise HTTPException(404, f"Container '{container_name}' not found in project '{project}'")
 
 
 @app.post("/api/v1/containers", response_model=ContainerInfo)
