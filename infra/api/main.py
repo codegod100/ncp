@@ -72,25 +72,45 @@ CADDY_BASE_DOMAIN = os.getenv("CADDY_BASE_DOMAIN", "nix.latha.org")
 
 # Caddy Dynamic Route Manager
 class CaddyManager:
-    """Manages Caddy reverse proxy routes via admin API."""
+    """Manages Caddy reverse proxy routes via admin API using urllib (built-in)."""
     
     def __init__(self, admin_api: str = CADDY_ADMIN_API, base_domain: str = CADDY_BASE_DOMAIN):
         self.admin_api = admin_api.rstrip('/')
         self.base_domain = base_domain
-        self._session = None
     
-    def _get_session(self):
-        """Get or create aiohttp session."""
-        if self._session is None:
-            import requests
-            self._session = requests.Session()
-        return self._session
+    def _http_request(self, method: str, path: str, data: dict = None) -> tuple:
+        """Make HTTP request using urllib."""
+        import urllib.request
+        import urllib.error
+        import json
+        
+        url = f"{self.admin_api}{path}"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        
+        try:
+            if data and method in ['POST', 'PUT', 'PATCH']:
+                body = json.dumps(data).encode('utf-8')
+                req = urllib.request.Request(url, data=body, headers=headers, method=method)
+            elif method in ['DELETE', 'GET']:
+                req = urllib.request.Request(url, headers=headers, method=method)
+            else:
+                req = urllib.request.Request(url, headers=headers, method=method)
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                status = response.status
+                body = response.read().decode('utf-8')
+                return status, body, None
+                
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode('utf-8'), str(e)
+        except Exception as e:
+            return 0, "", str(e)
     
     def add_container_route(self, container_name: str, container_ip: str, 
                            container_port: int = 80, 
                            custom_hostname: str = None) -> dict:
         """Add a new route for a container subdomain."""
-        import requests
+        import json
         
         hostname = custom_hostname or f"{container_name}.{self.base_domain}"
         route_id = f"container-{container_name}"
@@ -99,7 +119,7 @@ class CaddyManager:
         # Check if route already exists
         existing = self.get_route(route_id)
         if existing:
-            logger.info(f"[CADDY] Route {route_id} already exists, updating...")
+            logger.info(f"[CADDY] Route {route_id} already exists, removing old one...")
             self.remove_route(route_id)
         
         # Build Caddy route config
@@ -117,10 +137,13 @@ class CaddyManager:
         
         try:
             # Add route to Caddy
-            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes"
-            resp = requests.post(url, json=route_config, timeout=10)
+            status, body, error = self._http_request(
+                'POST', 
+                '/config/apps/http/servers/srv0/routes',
+                route_config
+            )
             
-            if resp.status_code in [200, 201]:
+            if status in [200, 201]:
                 logger.info(f"[CADDY] ✓ Added route: {hostname} → {upstream}")
                 return {
                     "success": True,
@@ -129,11 +152,11 @@ class CaddyManager:
                     "route_id": route_id
                 }
             else:
-                logger.error(f"[CADDY] ✗ Failed to add route: {resp.status_code} {resp.text}")
+                logger.error(f"[CADDY] ✗ Failed to add route: {status} {body} {error}")
                 return {
                     "success": False,
-                    "error": f"Caddy API returned {resp.status_code}",
-                    "details": resp.text
+                    "error": f"Caddy API returned {status}",
+                    "details": body or error
                 }
                 
         except Exception as e:
@@ -142,7 +165,7 @@ class CaddyManager:
     
     def remove_route(self, route_id: str) -> dict:
         """Remove a route by ID - finds index first then deletes."""
-        import requests
+        import json
         
         try:
             # First, list all routes to find the index of our route
@@ -165,15 +188,17 @@ class CaddyManager:
                 return {"success": False, "error": "Route has no index"}
             
             # Delete by numeric index
-            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes/{target_index}"
-            resp = requests.delete(url, timeout=10)
+            status, body, error = self._http_request(
+                'DELETE',
+                f'/config/apps/http/servers/srv0/routes/{target_index}'
+            )
             
-            if resp.status_code in [200, 204]:
+            if status in [200, 204]:
                 logger.info(f"[CADDY] ✓ Removed route {route_id} at index {target_index}")
                 return {"success": True, "route_id": route_id, "index": target_index}
             else:
-                logger.error(f"[CADDY] ✗ Failed to remove route: {resp.status_code} - {resp.text}")
-                return {"success": False, "error": f"HTTP {resp.status_code}"}
+                logger.error(f"[CADDY] ✗ Failed to remove route: {status} - {body} {error}")
+                return {"success": False, "error": f"HTTP {status}"}
                 
         except Exception as e:
             logger.error(f"[CADDY] ✗ Error removing route: {e}")
@@ -186,14 +211,16 @@ class CaddyManager:
     
     def get_route(self, route_id: str) -> Optional[dict]:
         """Get a specific route by ID."""
-        import requests
+        import json
         
         try:
-            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes/{route_id}"
-            resp = requests.get(url, timeout=10)
+            status, body, error = self._http_request(
+                'GET',
+                f'/config/apps/http/servers/srv0/routes/{route_id}'
+            )
             
-            if resp.status_code == 200:
-                return resp.json()
+            if status == 200 and body:
+                return json.loads(body)
             return None
             
         except Exception as e:
@@ -202,14 +229,16 @@ class CaddyManager:
     
     def list_routes(self) -> List[dict]:
         """List all container routes with their array indices."""
-        import requests
+        import json
         
         try:
-            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes"
-            resp = requests.get(url, timeout=10)
+            status, body, error = self._http_request(
+                'GET',
+                '/config/apps/http/servers/srv0/routes'
+            )
             
-            if resp.status_code == 200:
-                routes = resp.json()
+            if status == 200 and body:
+                routes = json.loads(body)
                 # Add index to each route and filter to only container routes
                 result = []
                 for i, route in enumerate(routes):
