@@ -15,22 +15,22 @@ HTML_CONTENT = b"""<!DOCTYPE html>
 </head>
 <body>
     <h1>Hello from Frontend</h1>
-    <p>This page fetches data from the backend container via the exposed port.</p>
+    <p>This page fetches data from the backend container via HTTPS at <code>backend.nix.latha.org</code>.</p>
     <div id="data"><span class="loading">Loading from backend...</span></div>
     
     <script>
         async function fetchFromBackend() {
             const dataDiv = document.getElementById('data');
             try {
-                // Backend is exposed on host port 9001
-                // For browser JS, we use the same host as the page
-                const backendUrl = window.location.protocol + '//' + window.location.hostname + ':9001/';
+                // Backend is available at backend.nix.latha.org via Caddy
+                const backendUrl = 'https://backend.nix.latha.org/';
                 const response = await fetch(backendUrl);
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const data = await response.json();
                 dataDiv.innerHTML = '<span class="success">Backend says:</span> <pre>' + JSON.stringify(data, null, 2) + '</pre>';
             } catch (err) {
-                dataDiv.innerHTML = '<span class="error">Error fetching from backend:</span> ' + err.message;
+                dataDiv.innerHTML = '<span class="error">Error fetching from backend:</span> ' + err.message + 
+                                   '<br><small>Make sure backend container is running with hostname backend.nix.latha.org</small>';
             }
         }
         

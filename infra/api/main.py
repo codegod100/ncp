@@ -620,8 +620,8 @@ def generate_html_page(title: str, body_content: str) -> str:
                     const statusClass = c.status === 'up' ? 'up' : 'down';
                     const portInfo = c.host_port ? ' (Port ' + c.host_port + ')' : '';
                     const owner = c.owner || 'unclaimed';
-                    const nameDisplay = c.host_port 
-                        ? '<a href="http://nix.latha.org:' + c.host_port + '">' + c.name + '</a>'
+                    const nameDisplay = c.hostname
+                        ? '<a href="https://' + c.hostname + '">' + c.name + '</a>'
                         : c.name;
                     html += '<div class="container"><strong>' + nameDisplay + '</strong> ' +
                            '<span class="status ' + statusClass + '">' + c.status + '</span> ' +
