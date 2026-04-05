@@ -1032,6 +1032,19 @@ in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
             logger.info(f"[DEPLOY]   Setting up port forward {host_port} -> {ip}:80...")
             setup_port_forward(host_port, ip, 80)  # Assume port 80 inside
             
+            # Add Caddy route for subdomain access
+            logger.info(f"[DEPLOY]   Adding Caddy route for '{full_name}'...")
+            caddy_result = caddy.add_container_route(
+                container_name=full_name,
+                container_ip=ip,
+                container_port=80
+            )
+            if caddy_result.get("success"):
+                hostname = caddy_result["hostname"]
+                logger.info(f"[DEPLOY]   ✓ Caddy route added: {hostname} → {caddy_result['upstream']}")
+            else:
+                logger.warning(f"[DEPLOY]   ⚠ Failed to add Caddy route: {caddy_result.get('error')}")
+            
             logger.info(f"[DEPLOY]   Saving '{full_name}' to database...")
             db.containers_db[full_name] = {
                 "ip": ip,
@@ -1041,7 +1054,8 @@ in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
                 "owner": user,
                 "project": project_name,
                 "created_at": datetime.now().isoformat(),
-                "system_path": system_path  # Track the built path
+                "system_path": system_path,  # Track the built path
+                "hostname": caddy_result.get("hostname") if caddy_result.get("success") else None
             }
             save_db(CONTAINERS_DB_FILE, db.containers_db)
             
@@ -1049,7 +1063,8 @@ in builtins.mapAttrs (n: c: c.port) (flake.ncp.containers or {{}})
                 name=full_name, status="up", ip=ip,
                 host_port=host_port,
                 created_at=db.containers_db[full_name]["created_at"],
-                owner=user
+                owner=user,
+                hostname=caddy_result.get("hostname") if caddy_result.get("success") else None
             ))
             logger.info(f"[DEPLOY]   ✓ Container '{full_name}' deployed successfully")
     
