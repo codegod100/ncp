@@ -80,11 +80,11 @@ in {
   services.caddy = {
     enable = true;
     
+    globalConfig = ''
+      admin :2019
+    '';
+    
     extraConfig = ''
-      {
-        admin :2019
-      }
-      
       nix.latha.org {
         handle /api/* {
           reverse_proxy localhost:8000
