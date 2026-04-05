@@ -80,32 +80,47 @@ in {
   services.caddy = {
     enable = true;
     
-    globalConfig = ''
-      admin :2019
-    '';
+    # Use JSON config for full control
+    configFile = pkgs.writeText "caddy.json" (builtins.toJSON {
+      admin = {
+        listen = ":2019";
+      };
+      apps = {
+        http = {
+          servers = {
+            srv0 = {
+              listen = [":443" ":80"];
+              routes = [
+                {
+                  match = [{host = ["nix.latha.org"];}];
+                  handle = [{
+                    handler = "subroute";
+                    routes = [
+                      {
+                        match = [{path = ["/api/*"];}];
+                        handle = [{
+                          handler = "reverse_proxy";
+                          upstreams = [{dial = "localhost:8000";}];
+                        }];
+                      }
+                      {
+                        handle = [{
+                          handler = "reverse_proxy";
+                          upstreams = [{dial = "localhost:8000";}];
+                        }];
+                      }
+                    ];
+                  }];
+                  terminal = true;
+                }
+              ];
+            };
+          };
+        };
+      };
+    });
     
-    extraConfig = ''
-      # Main API and web interface
-      nix.latha.org {
-        # API calls at /api/* - proxy with path intact
-        handle /api/* {
-          reverse_proxy localhost:8000
-        }
-        
-        # Root path / - HTML frontend
-        handle / {
-          reverse_proxy localhost:8000
-        }
-        
-        # All other paths to API
-        handle {
-          reverse_proxy localhost:8000
-        }
-      }
-      
-      # Dynamic container subdomains - populated via Caddy admin API
-      # Routes are added by NCP API at /config/apps/http/servers/srv0/routes
-    '';
+    adapter = "json";
   };
 
   # Firewall
