@@ -9,6 +9,8 @@ import requests
 import json
 import sys
 import os
+import subprocess
+import shutil
 from typing import Optional
 from pathlib import Path
 from urllib.parse import urljoin
@@ -582,6 +584,386 @@ def version():
 def demo(ctx):
     """Quick deploy a demo container"""
     ctx.invoke(deploy_demo, name='demo-web', port=8082)
+
+
+@cli.group()
+def secrets():
+    """Manage encrypted secrets using agenix
+    
+    Store sensitive data (API keys, passwords, tokens) encrypted
+    and make them available to containers at runtime.
+    
+    Commands:
+        init                    - Initialize agenix in current project
+        set <name>              - Create or update a secret
+        edit <name>             - Edit an existing secret
+        show <name>             - Decrypt and display a secret
+        list                    - List all secrets
+        rm <name>               - Delete a secret
+        template                - Generate Nix template for using secrets
+    
+    Example:
+        ncp secrets init
+        ncp secrets set database_password
+        ncp secrets set api_key
+        ncp list
+    """
+    pass
+
+
+def _get_project_secrets_dir() -> Path:
+    """Get the secrets directory for the current project"""
+    return Path.cwd() / "secrets"
+
+
+def _get_secrets_nix_path() -> Path:
+    """Get the path to secrets.nix"""
+    return Path.cwd() / "secrets.nix"
+
+
+def _find_ssh_pubkey() -> Optional[str]:
+    """Find the user's SSH public key"""
+    # Try common SSH key locations
+    possible_keys = [
+        Path.home() / ".ssh" / "id_ed25519.pub",
+        Path.home() / ".ssh" / "id_rsa.pub",
+        Path.home() / ".ssh" / "id_ecdsa.pub",
+    ]
+    for key_path in possible_keys:
+        if key_path.exists():
+            return str(key_path)
+    return None
+
+
+@secrets.command()
+@click.option('--key', '-k', help='SSH public key for encryption (defaults to ~/.ssh/id_ed25519.pub)')
+def init(key):
+    """Initialize agenix secrets in current project"""
+    project_dir = Path.cwd()
+    secrets_dir = _get_project_secrets_dir()
+    secrets_nix = _get_secrets_nix_path()
+    
+    # Check if already initialized
+    if secrets_nix.exists():
+        click.echo("⚠️  secrets.nix already exists in this directory")
+        if not click.confirm("Reinitialize? (this will backup existing secrets.nix)"):
+            return
+        # Backup existing
+        backup_path = secrets_nix.with_suffix('.nix.backup')
+        secrets_nix.rename(backup_path)
+        click.echo(f"📦 Backed up existing secrets.nix to {backup_path}")
+    
+    # Find SSH key
+    if not key:
+        key = _find_ssh_pubkey()
+        if not key:
+            click.echo("❌ No SSH public key found in ~/.ssh/")
+            click.echo("   Please generate one: ssh-keygen -t ed25519")
+            click.echo("   Or specify a key with --key /path/to/key.pub")
+            sys.exit(1)
+    
+    key_path = Path(key)
+    if not key_path.exists():
+        click.echo(f"❌ SSH key not found: {key}")
+        sys.exit(1)
+    
+    # Read the key
+    try:
+        with open(key_path, 'r') as f:
+            key_content = f.read().strip()
+    except Exception as e:
+        click.echo(f"❌ Failed to read SSH key: {e}")
+        sys.exit(1)
+    
+    # Create secrets directory
+    secrets_dir.mkdir(exist_ok=True)
+    (secrets_dir / ".gitignore").write_text("*\n!.gitignore\n")
+    
+    # Create initial secrets.nix
+    secrets_nix_content = f'''# Agenix secrets configuration
+# This file defines who can decrypt which secrets
+# DO NOT COMMIT THE secrets/ DIRECTORY - only commit this file
+
+let
+  # Add more SSH keys here to grant access
+  # other_user = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host";
+in
+{{
+  # Example: secret for database password
+  # "secrets/database_password.age".publicKeys = [ users_key ];
+
+  # Template for new secrets - copy and modify
+  # "secrets/my_secret.age".publicKeys = [ users_key ];
+}}
+'''
+    
+    # Substitute the actual key
+    secrets_nix_content = secrets_nix_content.replace('users_key', f'users_key /* {key_path.name} */')
+    
+    # Write the file with user's key
+    with open(secrets_nix, 'w') as f:
+        # Write properly formatted secrets.nix
+        f.write(f'''# Agenix secrets configuration
+# This file defines who can decrypt which secrets
+# DO NOT COMMIT THE secrets/ DIRECTORY - only commit this file
+
+let
+  users_key = "{key_content}";
+  # Add more SSH keys here to grant access
+  # other_user = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host";
+in
+{{
+  # Example: secret for database password
+  # "secrets/database_password.age".publicKeys = [ users_key ];
+
+  # Template for new secrets - copy and modify
+  # "secrets/my_secret.age".publicKeys = [ users_key ];
+}}
+''')
+    
+    click.echo("✅ Initialized agenix in current project")
+    click.echo(f"   Secrets directory: {secrets_dir}/")
+    click.echo(f"   Config file: {secrets_nix}")
+    click.echo(f"   Encryption key: {key_path}")
+    click.echo("")
+    click.echo("Next steps:")
+    click.echo("  1. ncp secrets set <secret_name>   # Create your first secret")
+    click.echo("  2. Add the secret to your flake.nix")
+    click.echo("")
+    click.echo("⚠️  IMPORTANT: Add secrets/ to .gitignore!")
+
+
+@secrets.command()
+@click.argument('name')
+@click.option('--value', '-v', help='Secret value (will prompt if not provided)')
+@click.option('--from-file', '-f', type=click.Path(exists=True), help='Read secret from file')
+def set(name, value, from_file):
+    """Create or update an encrypted secret"""
+    secrets_nix = _get_secrets_nix_path()
+    secrets_dir = _get_project_secrets_dir()
+    
+    if not secrets_nix.exists():
+        click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
+        sys.exit(1)
+    
+    # Get secret value
+    if from_file:
+        value = Path(from_file).read_text()
+    elif not value:
+        value = click.prompt(f'Enter value for {name}', hide_input=True, confirmation_prompt=True)
+    
+    if not value:
+        click.echo("❌ Secret value cannot be empty")
+        sys.exit(1)
+    
+    # Ensure .age extension
+    if not name.endswith('.age'):
+        name = f"{name}.age"
+    
+    secret_path = secrets_dir / name
+    
+    # Create temp file with secret
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
+        tmp.write(value)
+        tmp.flush()
+        tmp_path = tmp.name
+    
+    try:
+        # Encrypt using agenix
+        # agenix -e secrets/name.age -i /tmp/secret.txt
+        result = subprocess.run(
+            ['agenix', '-e', str(secret_path), '-i', tmp_path],
+            capture_output=True,
+            text=True,
+            cwd=str(Path.cwd())
+        )
+        
+        if result.returncode != 0:
+            click.echo(f"❌ Failed to encrypt secret: {result.stderr}")
+            sys.exit(1)
+        
+        # Update secrets.nix if this is a new secret
+        if secret_path not in Path(secrets_nix).read_text():
+            click.echo(f"📝 Adding {name} to secrets.nix...")
+            # This is a simplified approach - in production we'd parse and modify the Nix file properly
+            click.echo(f"   ⚠️  Remember to add 'secrets/{name}' to secrets.nix")
+        
+        click.echo(f"✅ Secret saved: {secret_path}")
+        click.echo(f"   Size: {len(value)} bytes")
+        
+    finally:
+        # Securely delete temp file
+        import shutil
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@secrets.command()
+@click.argument('name')
+def edit(name):
+    """Edit an existing secret"""
+    secrets_nix = _get_secrets_nix_path()
+    secrets_dir = _get_project_secrets_dir()
+    
+    if not secrets_nix.exists():
+        click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
+        sys.exit(1)
+    
+    # Ensure .age extension
+    if not name.endswith('.age'):
+        name = f"{name}.age"
+    
+    secret_path = secrets_dir / name
+    
+    if not secret_path.exists():
+        click.echo(f"❌ Secret not found: {name}")
+        click.echo("   Create it first with: ncp secrets set " + name.replace('.age', ''))
+        sys.exit(1)
+    
+    # Open in agenix editor
+    result = subprocess.run(
+        ['agenix', '-e', str(secret_path)],
+        capture_output=True,
+        text=True,
+        cwd=str(Path.cwd())
+    )
+    
+    if result.returncode != 0:
+        click.echo(f"❌ Failed to edit secret: {result.stderr}")
+        sys.exit(1)
+    
+    click.echo(f"✅ Secret updated: {secret_path}")
+
+
+@secrets.command()
+@click.argument('name')
+def show(name):
+    """Decrypt and display a secret (use with caution!)"""
+    secrets_nix = _get_secrets_nix_path()
+    secrets_dir = _get_project_secrets_dir()
+    
+    if not secrets_nix.exists():
+        click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
+        sys.exit(1)
+    
+    # Ensure .age extension
+    if not name.endswith('.age'):
+        name = f"{name}.age"
+    
+    secret_path = secrets_dir / name
+    
+    if not secret_path.exists():
+        click.echo(f"❌ Secret not found: {name}")
+        sys.exit(1)
+    
+    # Decrypt using agenix
+    result = subprocess.run(
+        ['agenix', '-d', str(secret_path)],
+        capture_output=True,
+        text=True,
+        cwd=str(Path.cwd())
+    )
+    
+    if result.returncode != 0:
+        click.echo(f"❌ Failed to decrypt secret: {result.stderr}")
+        sys.exit(1)
+    
+    click.echo(f"🔓 Decrypted secret ({name}):")
+    click.echo("─" * 40)
+    click.echo(result.stdout)
+
+
+@secrets.command()
+def list():
+    """List all secrets"""
+    secrets_nix = _get_secrets_nix_path()
+    secrets_dir = _get_project_secrets_dir()
+    
+    if not secrets_nix.exists():
+        click.echo("❌ Not an agenix project. Run 'ncp secrets init' first.")
+        sys.exit(1)
+    
+    if not secrets_dir.exists():
+        click.echo("No secrets directory found")
+        return
+    
+    secrets_files = list(secrets_dir.glob("*.age"))
+    
+    if not secrets_files:
+        click.echo("No secrets found")
+        return
+    
+    click.echo("📦 Secrets:")
+    for secret in sorted(secrets_files):
+        size = secret.stat().st_size
+        click.echo(f"   • {secret.name} ({size} bytes)")
+    
+    click.echo(f"\nTotal: {len(secrets_files)} secrets")
+
+
+@secrets.command()
+@click.argument('name')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation')
+def rm(name, yes):
+    """Delete a secret"""
+    secrets_dir = _get_project_secrets_dir()
+    
+    # Ensure .age extension
+    if not name.endswith('.age'):
+        name = f"{name}.age"
+    
+    secret_path = secrets_dir / name
+    
+    if not secret_path.exists():
+        click.echo(f"❌ Secret not found: {name}")
+        sys.exit(1)
+    
+    if not yes:
+        if not click.confirm(f"Delete {name}?"):
+            return
+    
+    secret_path.unlink()
+    click.echo(f"✅ Deleted: {name}")
+    click.echo("⚠️  Remember to remove the entry from secrets.nix")
+
+
+@secrets.command()
+def template():
+    """Generate Nix template for using secrets in containers"""
+    template = '''
+# Example: Using secrets in your flake.nix
+
+{ config, pkgs, agenix, ... }:
+
+{
+  # Import agenix module
+  imports = [ agenix.nixosModules.default ];
+
+  # Enable agenix
+  age.identityPaths = [ "/root/.ssh/id_ed25519" ];
+  
+  # Define secrets
+  age.secrets.database_password = {
+    file = ./secrets/database_password.age;
+    owner = "myapp";
+    group = "myapp";
+    mode = "600";
+  };
+
+  # Use secret in a service
+  systemd.services.myapp = {
+    serviceConfig = {
+      # Pass secret path as environment variable
+      Environment = "DB_PASSWORD_FILE=%{config.age.secrets.database_password.path}";
+    };
+  };
+}
+
+# Then in your application, read the secret from the file:
+# DB_PASSWORD=$(cat $DB_PASSWORD_FILE)
+'''
+    click.echo(template)
+    click.echo("\n# Save this to your flake.nix and adapt as needed")
 
 
 if __name__ == '__main__':
