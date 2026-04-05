@@ -63,6 +63,7 @@ in {
     
     environment = {
       NIX_PATH = "nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos";
+      NCP_DATA_DIR = "/root/.config/ncp";
     };
     
     serviceConfig = {
@@ -72,7 +73,6 @@ in {
       RestartSec = 5;
       User = "root";
       Group = "root";
-      StateDirectory = "ncp";
     };
   };
 
