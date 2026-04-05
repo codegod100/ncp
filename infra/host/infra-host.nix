@@ -83,7 +83,6 @@ in {
     globalConfig = ''
       {
         admin :2019
-        auto_https off
       }
     '';
     
@@ -106,11 +105,8 @@ in {
         }
       }
       
-      # Dynamic container subdomains - initial empty, populated via API
-      # Routes will be added by NCP API at /config/apps/http/servers/srv0/routes
-      
-      # Wildcard catch-all for container subdomains (uses Caddyfile for static, API for dynamic)
-      # This is a placeholder - actual routes added via admin API
+      # Dynamic container subdomains - populated via Caddy admin API
+      # Routes are added by NCP API at /config/apps/http/servers/srv0/routes
     '';
   };
 
