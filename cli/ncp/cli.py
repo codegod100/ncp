@@ -159,6 +159,41 @@ class NCPClient:
         self._handle_error(response)
         return response
 
+    # Secrets API methods
+    def list_secrets(self):
+        """List all secrets"""
+        response = self.session.get(self._url('/api/v1/secrets'))
+        self._handle_error(response)
+        return response.json()
+    
+    def upload_secret(self, name: str, content: bytes):
+        """Upload an encrypted secret"""
+        if not name.endswith('.age'):
+            name = f"{name}.age"
+        response = self.session.post(
+            self._url(f'/api/v1/secrets/{name}'),
+            data=content,
+            headers={'Content-Type': 'application/octet-stream'}
+        )
+        self._handle_error(response)
+        return response.json()
+    
+    def download_secret(self, name: str):
+        """Download a secret"""
+        if not name.endswith('.age'):
+            name = f"{name}.age"
+        response = self.session.get(self._url(f'/api/v1/secrets/{name}'))
+        self._handle_error(response)
+        return response.content
+    
+    def delete_secret_api(self, name: str):
+        """Delete a secret"""
+        if not name.endswith('.age'):
+            name = f"{name}.age"
+        response = self.session.delete(self._url(f'/api/v1/secrets/{name}'))
+        self._handle_error(response)
+        return response.json()
+
 
 @click.group()
 @click.option('--api-url', envvar='NCP_API_URL', default=DEFAULT_API_URL,
@@ -964,6 +999,145 @@ def template():
 '''
     click.echo(template)
     click.echo("\n# Save this to your flake.nix and adapt as needed")
+
+
+# Remote secrets sync commands
+@secrets.group(name='remote')
+def secrets_remote():
+    """Sync secrets with remote NCP server
+    
+    Upload and download encrypted secrets to/from the NCP server.
+    Secrets remain encrypted during transfer and on the server.
+    """
+    pass
+
+
+@secrets_remote.command(name='upload')
+@click.argument('name')
+@click.pass_context
+def secrets_upload(ctx, name):
+    """Upload a secret to the remote server"""
+    client = ctx.obj['client']
+    secrets_dir = _get_project_secrets_dir()
+    
+    # Ensure .age extension
+    if not name.endswith('.age'):
+        name = f"{name}.age"
+    
+    secret_path = secrets_dir / name
+    
+    if not secret_path.exists():
+        click.echo(f"❌ Secret not found locally: {name}")
+        sys.exit(1)
+    
+    click.echo(f"☁️  Uploading {name} to remote...")
+    
+    with open(secret_path, 'rb') as f:
+        content = f.read()
+    
+    result = client.upload_secret(name, content)
+    click.echo(f"✅ Uploaded: {name} ({len(content)} bytes)")
+
+
+@secrets_remote.command(name='download')
+@click.argument('name')
+@click.pass_context
+def secrets_download(ctx, name):
+    """Download a secret from the remote server"""
+    client = ctx.obj['client']
+    secrets_dir = _get_project_secrets_dir()
+    
+    # Ensure .age extension
+    if not name.endswith('.age'):
+        name = f"{name}.age"
+    
+    click.echo(f"☁️  Downloading {name} from remote...")
+    
+    content = client.download_secret(name)
+    
+    # Save to local secrets directory
+    secrets_dir.mkdir(exist_ok=True)
+    secret_path = secrets_dir / name
+    
+    with open(secret_path, 'wb') as f:
+        f.write(content)
+    
+    os.chmod(secret_path, 0o600)
+    click.echo(f"✅ Downloaded: {name} ({len(content)} bytes)")
+
+
+@secrets_remote.command(name='sync')
+@click.option('--push', is_flag=True, help='Push all local secrets to remote')
+@click.option('--pull', is_flag=True, help='Pull all remote secrets locally')
+@click.pass_context
+def secrets_sync(ctx, push, pull):
+    """Sync all secrets with remote server"""
+    client = ctx.obj['client']
+    secrets_dir = _get_project_secrets_dir()
+    
+    if not push and not pull:
+        click.echo("❌ Specify --push or --pull")
+        sys.exit(1)
+    
+    if push:
+        click.echo("☁️  Pushing local secrets to remote...")
+        if not secrets_dir.exists():
+            click.echo("❌ No local secrets directory")
+            sys.exit(1)
+        
+        secrets = list(secrets_dir.glob("*.age"))
+        if not secrets:
+            click.echo("No local secrets to push")
+            return
+        
+        for secret in secrets:
+            with open(secret, 'rb') as f:
+                content = f.read()
+            client.upload_secret(secret.name, content)
+            click.echo(f"   ✓ {secret.name}")
+        
+        click.echo(f"✅ Pushed {len(secrets)} secrets")
+    
+    if pull:
+        click.echo("☁️  Pulling remote secrets...")
+        result = client.list_secrets()
+        secrets = result.get('secrets', [])
+        
+        if not secrets:
+            click.echo("No remote secrets to pull")
+            return
+        
+        secrets_dir.mkdir(exist_ok=True)
+        
+        for name in secrets:
+            content = client.download_secret(name)
+            secret_path = secrets_dir / name
+            with open(secret_path, 'wb') as f:
+                f.write(content)
+            os.chmod(secret_path, 0o600)
+            click.echo(f"   ✓ {name}")
+        
+        click.echo(f"✅ Pulled {len(secrets)} secrets")
+
+
+@secrets_remote.command(name='list')
+@click.pass_context
+def secrets_remote_list(ctx):
+    """List secrets on remote server"""
+    client = ctx.obj['client']
+    
+    click.echo("☁️  Remote secrets:")
+    result = client.list_secrets()
+    secrets = result.get('secrets', [])
+    
+    if not secrets:
+        click.echo("   No secrets found on remote")
+        return
+    
+    for name in secrets:
+        click.echo(f"   • {name}")
+    
+    click.echo(f"\nTotal: {len(secrets)} secrets on remote")
 
 
 if __name__ == '__main__':

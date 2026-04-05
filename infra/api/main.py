@@ -8,6 +8,7 @@ import subprocess
 import json
 import logging
 import sys
+from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -24,7 +25,7 @@ logger.info("=" * 60)
 logger.info("NCP API Starting up")
 logger.info("=" * 60)
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -934,6 +935,97 @@ async def me(user: str = Depends(require_user)):
     info = db.users_db.get(user, {})
     logger.debug(f"[AUTH] User info request for '{user}' (admin={info.get('is_admin', False)})")
     return {"username": user, "is_admin": info.get("is_admin", False)}
+
+
+# Secrets endpoints
+@app.get("/api/v1/secrets")
+async def list_secrets(user: str = Depends(require_user)):
+    """List available secrets for the user."""
+    logger.info(f"[SECRETS] User '{user}' listing secrets")
+    
+    secrets_dir = Path("/var/lib/ncp/secrets")
+    if not secrets_dir.exists():
+        return {"secrets": []}
+    
+    secrets = [f.name for f in secrets_dir.glob("*.age")]
+    logger.info(f"[SECRETS] Found {len(secrets)} secrets")
+    return {"secrets": secrets}
+
+
+@app.post("/api/v1/secrets/{secret_name}")
+async def upload_secret(
+    secret_name: str,
+    request: Request,
+    user: str = Depends(require_user)
+):
+    """Upload an encrypted secret file."""
+    logger.info(f"[SECRETS] User '{user}' uploading secret '{secret_name}'")
+    
+    # Ensure .age extension
+    if not secret_name.endswith('.age'):
+        secret_name = f"{secret_name}.age"
+    
+    secrets_dir = Path("/var/lib/ncp/secrets")
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    
+    secret_path = secrets_dir / secret_name
+    
+    # Read the encrypted content from request body
+    content = await request.body()
+    
+    # Validate it looks like an age-encrypted file
+    if not content.startswith(b'age-encryption'):
+        logger.warning(f"[SECRETS] Invalid age encryption format for '{secret_name}'")
+        raise HTTPException(400, "Invalid age encryption format")
+    
+    # Write the secret
+    with open(secret_path, 'wb') as f:
+        f.write(content)
+    
+    os.chmod(secret_path, 0o600)
+    
+    logger.info(f"[SECRETS] ✓ Secret '{secret_name}' saved ({len(content)} bytes)")
+    return {"success": True, "secret": secret_name, "size": len(content)}
+
+
+@app.get("/api/v1/secrets/{secret_name}")
+async def get_secret(secret_name: str, user: str = Depends(require_user)):
+    """Get a secret (returns encrypted content)."""
+    logger.info(f"[SECRETS] User '{user}' retrieving secret '{secret_name}'")
+    
+    if not secret_name.endswith('.age'):
+        secret_name = f"{secret_name}.age"
+    
+    secret_path = Path("/var/lib/ncp/secrets") / secret_name
+    
+    if not secret_path.exists():
+        logger.warning(f"[SECRETS] Secret '{secret_name}' not found")
+        raise HTTPException(404, "Secret not found")
+    
+    with open(secret_path, 'rb') as f:
+        content = f.read()
+    
+    logger.info(f"[SECRETS] ✓ Secret '{secret_name}' retrieved ({len(content)} bytes)")
+    return Response(content=content, media_type="application/octet-stream")
+
+
+@app.delete("/api/v1/secrets/{secret_name}")
+async def delete_secret(secret_name: str, user: str = Depends(require_user)):
+    """Delete a secret."""
+    logger.info(f"[SECRETS] User '{user}' deleting secret '{secret_name}'")
+    
+    if not secret_name.endswith('.age'):
+        secret_name = f"{secret_name}.age"
+    
+    secret_path = Path("/var/lib/ncp/secrets") / secret_name
+    
+    if not secret_path.exists():
+        logger.warning(f"[SECRETS] Secret '{secret_name}' not found")
+        raise HTTPException(404, "Secret not found")
+    
+    secret_path.unlink()
+    logger.info(f"[SECRETS] ✓ Secret '{secret_name}' deleted")
+    return {"success": True, "message": f"Secret '{secret_name}' deleted"}
 
 
 # Admin endpoints
