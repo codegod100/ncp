@@ -141,21 +141,38 @@ class CaddyManager:
             return {"success": False, "error": str(e)}
     
     def remove_route(self, route_id: str) -> dict:
-        """Remove a route by ID."""
+        """Remove a route by ID - finds index first then deletes."""
         import requests
         
         try:
-            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes/{route_id}"
+            # First, list all routes to find the index of our route
+            routes = self.list_routes()
+            
+            # Find the route with matching ID
+            target_route = None
+            for route in routes:
+                if route.get("@id") == route_id:
+                    target_route = route
+                    break
+            
+            if target_route is None:
+                logger.info(f"[CADDY] Route not found: {route_id}")
+                return {"success": True, "route_id": route_id, "note": "Route did not exist"}
+            
+            target_index = target_route.get("_index")
+            if target_index is None:
+                logger.error(f"[CADDY] Route {route_id} has no index")
+                return {"success": False, "error": "Route has no index"}
+            
+            # Delete by numeric index
+            url = f"{self.admin_api}/config/apps/http/servers/srv0/routes/{target_index}"
             resp = requests.delete(url, timeout=10)
             
             if resp.status_code in [200, 204]:
-                logger.info(f"[CADDY] ✓ Removed route: {route_id}")
-                return {"success": True, "route_id": route_id}
-            elif resp.status_code == 404:
-                logger.info(f"[CADDY] Route not found: {route_id}")
-                return {"success": True, "route_id": route_id, "note": "Route did not exist"}
+                logger.info(f"[CADDY] ✓ Removed route {route_id} at index {target_index}")
+                return {"success": True, "route_id": route_id, "index": target_index}
             else:
-                logger.error(f"[CADDY] ✗ Failed to remove route: {resp.status_code}")
+                logger.error(f"[CADDY] ✗ Failed to remove route: {resp.status_code} - {resp.text}")
                 return {"success": False, "error": f"HTTP {resp.status_code}"}
                 
         except Exception as e:
@@ -184,7 +201,7 @@ class CaddyManager:
             return None
     
     def list_routes(self) -> List[dict]:
-        """List all container routes."""
+        """List all container routes with their array indices."""
         import requests
         
         try:
@@ -193,8 +210,13 @@ class CaddyManager:
             
             if resp.status_code == 200:
                 routes = resp.json()
-                # Filter to only container routes
-                return [r for r in routes if r.get("@id", "").startswith("container-")]
+                # Add index to each route and filter to only container routes
+                result = []
+                for i, route in enumerate(routes):
+                    if route.get("@id", "").startswith("container-"):
+                        route["_index"] = i  # Add array index for deletion
+                        result.append(route)
+                return result
             return []
             
         except Exception as e:
