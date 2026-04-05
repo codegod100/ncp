@@ -924,18 +924,19 @@ def secrets_list():
         click.echo("No secrets directory found")
         return
     
-    secrets_files = list(secrets_dir.glob("*.age"))
+    secrets_files = secrets_dir.glob("*.age")
+    secrets_list = [f for f in secrets_files]
     
-    if not secrets_files:
+    if not secrets_list:
         click.echo("No secrets found")
         return
     
     click.echo("📦 Secrets:")
-    for secret in sorted(secrets_files):
+    for secret in sorted(secrets_list):
         size = secret.stat().st_size
         click.echo(f"   • {secret.name} ({size} bytes)")
     
-    click.echo(f"\nTotal: {len(secrets_files)} secrets")
+    click.echo(f"\nTotal: {len(secrets_list)} secrets")
 
 
 @secrets.command()
