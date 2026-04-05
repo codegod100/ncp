@@ -795,9 +795,31 @@ def set(name, value, from_file):
     if not name.endswith('.age'):
         name = f"{name}.age"
     
+    # Secret path relative to project root
+    secret_relative = f"secrets/{name}"
     secret_path = secrets_dir / name
     
-    # Create temp file with secret
+    # STEP 1: Add secret to secrets.nix if not already there
+    secrets_nix_content = secrets_nix.read_text()
+    secret_entry = f'"{secret_relative}".publicKeys = [ users_key ];'
+    
+    if secret_relative not in secrets_nix_content:
+        click.echo(f"📝 Adding {secret_relative} to secrets.nix...")
+        # Find the closing brace and insert before it
+        lines = secrets_nix_content.split('\n')
+        # Look for the closing `}` of the attribute set
+        insert_idx = len(lines)
+        for i, line in enumerate(lines):
+            if line.strip() == '}' and i > len(lines) - 5:  # Last closing brace
+                insert_idx = i
+                break
+        
+        # Insert the new secret entry
+        lines.insert(insert_idx, f'  {secret_entry}')
+        secrets_nix.write_text('\n'.join(lines))
+        click.echo(f"   ✓ Added to secrets.nix")
+    
+    # STEP 2: Create temp file with secret value
     import tempfile
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
         tmp.write(value)
@@ -805,32 +827,34 @@ def set(name, value, from_file):
         tmp_path = tmp.name
     
     try:
-        # Encrypt using agenix
-        # agenix -e secrets/name.age -i /tmp/secret.txt
+        # STEP 3: Encrypt using agenix
+        # For new secrets, we need to use EDITOR to create the file
+        # agenix will use the EDITOR to create the file, but we want to automate this
+        # So we use a trick: set EDITOR to cat the temp file
+        
+        env = os.environ.copy()
+        env['EDITOR'] = f'cat {tmp_path}'
+        
+        click.echo(f"🔐 Encrypting {name}...")
         result = subprocess.run(
-            ['agenix', '-e', str(secret_path), '-i', tmp_path],
+            ['agenix', '-e', secret_relative],
             capture_output=True,
             text=True,
-            cwd=str(Path.cwd())
+            cwd=str(Path.cwd()),
+            env=env
         )
         
         if result.returncode != 0:
             click.echo(f"❌ Failed to encrypt secret: {result.stderr}")
             sys.exit(1)
         
-        # Update secrets.nix if this is a new secret
-        if secret_path not in Path(secrets_nix).read_text():
-            click.echo(f"📝 Adding {name} to secrets.nix...")
-            # This is a simplified approach - in production we'd parse and modify the Nix file properly
-            click.echo(f"   ⚠️  Remember to add 'secrets/{name}' to secrets.nix")
-        
         click.echo(f"✅ Secret saved: {secret_path}")
-        click.echo(f"   Size: {len(value)} bytes")
+        click.echo(f"   Size: {len(value)} bytes encrypted")
+        click.echo(f"   Entry in secrets.nix: {secret_entry}")
         
     finally:
         # Securely delete temp file
-        import shutil
-        shutil.rmtree(tmp_path, ignore_errors=True)
+        os.unlink(tmp_path)
 
 
 @secrets.command()
