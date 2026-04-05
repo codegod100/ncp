@@ -736,17 +736,13 @@ def init(key):
 # This file defines who can decrypt which secrets
 # DO NOT COMMIT THE secrets/ DIRECTORY - only commit this file
 
-# Define who can decrypt secrets
-[[identities]]
-name = "default"
-public_key = "{key_content}"
+[identities]
+default = "{key_content}"
 
 # Add more identities here
-# [[identities]]
-# name = "other_user"
-# public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
+# other_user = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
 
-# Secret definitions
+# Secret definitions (add your secrets here)
 # [[paths]]
 # path = "secrets/my_secret.age"
 # glob = "secrets/my_secret.age"
@@ -808,8 +804,7 @@ def set(name, value, from_file):
             click.echo(f"📝 Adding {secret_relative} to .agenix.toml...")
             
             # Append new path entry to TOML
-            new_entry = f'''
-[[paths]]
+            new_entry = f'''\n[[paths]]
 path = "{secret_relative}"
 glob = "{secret_relative}"
 identities = [ "default" ]
