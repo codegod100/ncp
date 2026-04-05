@@ -1,0 +1,23 @@
+{
+	admin :2019
+	log {
+		level ERROR
+	}
+}
+
+nix.latha.org {
+	handle /api/* {
+		reverse_proxy localhost:8000
+	}
+
+	handle / {
+		reverse_proxy localhost:8000
+	}
+
+	handle {
+		reverse_proxy localhost:8000
+	}
+}
+
+# Dynamic container routes added via admin API
+# Container subdomains will be: {container-name}.nix.latha.org

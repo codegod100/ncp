@@ -79,26 +79,7 @@ in {
   # Caddy reverse proxy with admin API for dynamic routes
   services.caddy = {
     enable = true;
-    
-    globalConfig = ''
-      admin :2019
-    '';
-    
-    extraConfig = ''
-      nix.latha.org {
-        handle /api/* {
-          reverse_proxy localhost:8000
-        }
-        
-        handle / {
-          reverse_proxy localhost:8000
-        }
-        
-        handle {
-          reverse_proxy localhost:8000
-        }
-      }
-    '';
+    configFile = pkgs.writeText "Caddyfile" (builtins.readFile ./Caddyfile);
   };
 
   # Firewall
