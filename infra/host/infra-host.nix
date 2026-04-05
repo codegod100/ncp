@@ -81,9 +81,7 @@ in {
     enable = true;
     
     globalConfig = ''
-      {
-        admin :2019
-      }
+      admin :2019
     '';
     
     extraConfig = ''
