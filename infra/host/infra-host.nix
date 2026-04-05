@@ -80,45 +80,25 @@ in {
   services.caddy = {
     enable = true;
     
-    # Use JSON config for full control
-    configFile = pkgs.writeText "caddy.json" (builtins.toJSON {
-      admin = {
-        listen = ":2019";
-      };
-      apps = {
-        http = {
-          servers = {
-            srv0 = {
-              listen = [":443" ":80"];
-              routes = [
-                {
-                  match = [{host = ["nix.latha.org"];}];
-                  handle = [{
-                    handler = "subroute";
-                    routes = [
-                      {
-                        match = [{path = ["/api/*"];}];
-                        handle = [{
-                          handler = "reverse_proxy";
-                          upstreams = [{dial = "localhost:8000";}];
-                        }];
-                      }
-                      {
-                        handle = [{
-                          handler = "reverse_proxy";
-                          upstreams = [{dial = "localhost:8000";}];
-                        }];
-                      }
-                    ];
-                  }];
-                  terminal = true;
-                }
-              ];
-            };
-          };
-        };
-      };
-    });
+    extraConfig = ''
+      {
+        admin :2019
+      }
+      
+      nix.latha.org {
+        handle /api/* {
+          reverse_proxy localhost:8000
+        }
+        
+        handle / {
+          reverse_proxy localhost:8000
+        }
+        
+        handle {
+          reverse_proxy localhost:8000
+        }
+      }
+    '';
   };
 
   # Firewall
