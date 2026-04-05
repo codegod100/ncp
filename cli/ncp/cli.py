@@ -264,15 +264,16 @@ def list(ctx):
     if not containers:
         click.echo("No containers found.")
     else:
-        click.echo(f"\n{'NAME':<20} {'STATUS':<10} {'IP':<15} {'PORT':<6}")
-        click.echo("-" * 55)
+        click.echo(f"\n{'NAME':<15} {'STATUS':<8} {'IP':<14} {'PORT':<6} {'HOSTNAME'}")
+        click.echo("-" * 70)
         
         for c in containers:
-            name = c['name']
-            status = c['status']
-            ip = c.get('ip') or '-'
-            port = str(c.get('host_port') or '-')
-            click.echo(f"{name:<20} {status:<10} {ip:<15} {port:<6}")
+            name = c['name'][:14]
+            status = c['status'][:7]
+            ip = (c.get('ip') or '-')[:13]
+            port = str(c.get('host_port') or '-')[:5]
+            hostname = c.get('hostname') or '-'
+            click.echo(f"{name:<15} {status:<8} {ip:<14} {port:<6} {hostname}")
     
     click.echo()
 
