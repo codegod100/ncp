@@ -891,13 +891,16 @@ def show(name):
         click.echo(f"❌ Secret not found: {name}")
         sys.exit(1)
     
-    # Decrypt using agenix (just pass the path, it decrypts by default)
+    # Decrypt using agenix (use EDITOR=cat to output to stdout without opening editor)
     secret_relative = f"secrets/{name}"
+    env = os.environ.copy()
+    env['EDITOR'] = 'cat'
     result = subprocess.run(
         ['agenix', secret_relative],
         capture_output=True,
         text=True,
-        cwd=str(Path.cwd())
+        cwd=str(Path.cwd()),
+        env=env
     )
     
     if result.returncode != 0:
