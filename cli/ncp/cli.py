@@ -911,8 +911,8 @@ def show(name):
     click.echo(result.stdout)
 
 
-@secrets.command()
-def list():
+@secrets.command(name='list')
+def secrets_list():
     """List all secrets"""
     secrets_dir = _get_project_secrets_dir()
     
