@@ -816,37 +816,24 @@ identities = [ "default" ]
         # Legacy format - add to secrets.nix
         click.echo(f"⚠️  Using legacy secrets.nix format. Consider migrating to .agenix.toml")
     
-    # STEP 2: Create temp file with secret value
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
-        tmp.write(value)
-        tmp.flush()
-        tmp_path = tmp.name
+    # STEP 2: Encrypt using agenix
+    # For new secrets, use -s to read from stdin
+    click.echo(f"🔐 Encrypting {name}...")
     
-    try:
-        # STEP 3: Encrypt using agenix
-        env = os.environ.copy()
-        env['EDITOR'] = f'cat {tmp_path}'
-        
-        click.echo(f"🔐 Encrypting {name}...")
-        result = subprocess.run(
-            ['agenix', '-e', secret_relative],
-            capture_output=True,
-            text=True,
-            cwd=str(project_dir),
-            env=env
-        )
-        
-        if result.returncode != 0:
-            click.echo(f"❌ Failed to encrypt secret: {result.stderr}")
-            sys.exit(1)
-        
-        click.echo(f"✅ Secret saved: {secret_path}")
-        click.echo(f"   Size: {len(value)} bytes encrypted")
-        
-    finally:
-        # Securely delete temp file
-        os.unlink(tmp_path)
+    result = subprocess.run(
+        ['agenix', '-s', secret_relative],
+        input=value,  # Pass value via stdin
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir)
+    )
+    
+    if result.returncode != 0:
+        click.echo(f"❌ Failed to encrypt secret: {result.stderr}")
+        sys.exit(1)
+    
+    click.echo(f"✅ Secret saved: {secret_path}")
+    click.echo(f"   Size: {len(value)} bytes encrypted")
 
 
 @secrets.command()
