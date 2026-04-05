@@ -857,17 +857,15 @@ def edit(name):
         click.echo("   Create it first with: ncp secrets set " + name.replace('.age', ''))
         sys.exit(1)
     
-    # Open in agenix editor
+    # Open in agenix editor (agenix opens editor by default when file exists)
     secret_relative = f"secrets/{name}"
     result = subprocess.run(
-        ['agenix', '-e', secret_relative],
-        capture_output=True,
-        text=True,
+        ['agenix', secret_relative],
         cwd=str(Path.cwd())
     )
     
     if result.returncode != 0:
-        click.echo(f"❌ Failed to edit secret: {result.stderr}")
+        click.echo(f"❌ Failed to edit secret")
         sys.exit(1)
     
     click.echo(f"✅ Secret updated: {secret_path}")
@@ -893,10 +891,10 @@ def show(name):
         click.echo(f"❌ Secret not found: {name}")
         sys.exit(1)
     
-    # Decrypt using agenix
+    # Decrypt using agenix (just pass the path, it decrypts by default)
     secret_relative = f"secrets/{name}"
     result = subprocess.run(
-        ['agenix', '-d', secret_relative],
+        ['agenix', secret_relative],
         capture_output=True,
         text=True,
         cwd=str(Path.cwd())
